@@ -1,0 +1,45 @@
+{
+  "1": {
+    "class_type": "FluxPanoramaLoader",
+    "inputs": {
+      "model": "flux1-dev.safetensors",
+      "base_pipeline": "black-forest-labs/FLUX.1-dev",
+      "lora_id": "Insta360-Research/DiT360-Panorama-Image-Generation",
+      "dtype": "float16",
+      "enable_vae_tiling": true,
+      "enable_vae_slicing": true,
+      "cpu_offload": "balanced",
+      "balanced_offload_gb": 16.0
+    },
+    "_meta": { "title": "Flux Panorama Loader" }
+  },
+  "2": {
+    "class_type": "DiT360TextToPanorama",
+    "inputs": {
+      "pipeline": ["1", 0],
+      "prompt": "This is a panorama image. a derelict sci-fi cargo bay, dim red lighting",
+      "width": 2048,
+      "steps": 50,
+      "guidance_scale": 2.8,
+      "seed": 0
+    },
+    "_meta": { "title": "DiT360 Text to Panorama" }
+  },
+  "3": {
+    "class_type": "Equirect360EdgeBlender",
+    "inputs": {
+      "image": ["2", 0],
+      "blend_width": 16,
+      "blend_mode": "cosine"
+    },
+    "_meta": { "title": "360 Edge Blender" }
+  },
+  "4": {
+    "class_type": "SaveImage",
+    "inputs": {
+      "filename_prefix": "pano",
+      "images": ["3", 0]
+    },
+    "_meta": { "title": "Save Image" }
+  }
+}

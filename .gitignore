@@ -1,0 +1,32 @@
+# Generated scenes / assets (don't commit large binaries)
+*.glb
+*.gltf
+*.npy
+*.ckpt
+*.pth
+*.pt
+*.safetensors
+out/
+output*/
+checkpoints/
+
+# Godot
+godot_viewer/.godot/
+godot_viewer/*.import
+.import/
+export.cfg
+export_presets.cfg
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+build.log
