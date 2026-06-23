@@ -36,6 +36,9 @@ def main() -> None:
     ap.add_argument("glb", help="input scene GLB (e.g. MIDI output.glb)")
     ap.add_argument("--scale", type=float, default=3.0,
                     help="uniform scale up (MIDI output is ~unit-cube). Default 3.")
+    ap.add_argument("--scale-xyz", type=float, nargs=3, default=None,
+                    metavar=("X", "Y", "Z"),
+                    help="non-uniform scale (overrides --scale)")
     ap.add_argument("--target-faces", type=int, default=12000,
                     help="per-object face budget when decimating UNtextured meshes")
     ap.add_argument("--viewer-dir", default=os.path.join(os.path.dirname(__file__),
@@ -50,13 +53,14 @@ def main() -> None:
     meshes = scene.dump(concatenate=False)
     any_textured = any(_is_textured(m) for m in meshes)
 
+    scale_vec = np.array(args.scale_xyz if args.scale_xyz else [args.scale] * 3,
+                         dtype=np.float32)
+
     if any_textured:
-        # Decimating textured meshes scrambles UVs -> scale only, keep as-is.
-        print(f"{len(meshes)} objects, textured -> scaling x{args.scale}, no decimation")
-        scene.apply_transform(trimesh.transformations.scale_matrix(args.scale))
+        print(f"{len(meshes)} objects, textured -> scaling {scale_vec}, no decimation")
+        scene.apply_transform(np.diag([*scale_vec, 1.0]))
         out_scene = scene
     else:
-        # Untextured raw geometry: decimate each object to the face budget.
         try:
             import fast_simplification as fs
         except ImportError:
@@ -72,10 +76,17 @@ def main() -> None:
                 V, F = fs.simplify(V, F, target_reduction=reduction)
             after += len(F)
             out_scene.add_geometry(
-                trimesh.Trimesh(vertices=V * args.scale, faces=F, process=False),
+                trimesh.Trimesh(vertices=V * scale_vec, faces=F, process=False),
                 geom_name=f"object_{i}")
         print(f"{len(meshes)} objects, untextured -> decimated {before} -> {after} "
-              f"faces, scaled x{args.scale}")
+              f"faces, scaled {scale_vec}")
+
+    # Shift objects so their bottom sits on Y=0 (the floor)
+    bounds = out_scene.bounds
+    if bounds is not None:
+        shift = np.eye(4)
+        shift[1, 3] = -bounds[0][1]
+        out_scene.apply_transform(shift)
 
     os.makedirs(args.viewer_dir, exist_ok=True)
     out_path = os.path.join(args.viewer_dir, f"{args.name}.glb")
