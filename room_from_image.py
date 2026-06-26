@@ -43,10 +43,23 @@ class DetectedPlane:
 # STAGE 1: DEPTH ESTIMATION
 # ============================================================================
 
-DEPTH_ANYTHING_REPO = os.environ.get(
-    "DEPTH_ANYTHING_V2",
-    os.path.join(os.path.dirname(__file__), "..", "..", "Depth-Anything-V2"),
-)
+def _find_depth_anything() -> str:
+    """Locate the Depth-Anything-V2 repo, preferring the consolidated external/."""
+    env = os.environ.get("DEPTH_ANYTHING_V2")
+    if env:
+        return env
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "..", "external", "Depth-Anything-V2"),  # consolidated
+        os.path.join(here, "..", "..", "Depth-Anything-V2"),        # legacy sibling
+    ]
+    for cand in candidates:
+        if os.path.isdir(cand):
+            return os.path.normpath(cand)
+    return os.path.normpath(candidates[0])
+
+
+DEPTH_ANYTHING_REPO = _find_depth_anything()
 
 
 def estimate_depth(image_path: str, checkpoint: str) -> tuple[np.ndarray, np.ndarray]:
@@ -287,6 +300,83 @@ def _make_quad(corner, edge1, edge2):
     return verts, faces
 
 
+def _make_subdivided_quad(corner, edge1, edge2, subdivisions):
+    """Create a subdivided quad mesh with UVs, facing the origin."""
+    n = subdivisions + 1
+    verts = np.zeros((n * n, 3), dtype=np.float32)
+    uvs = np.zeros((n * n, 2), dtype=np.float32)
+    for j in range(n):
+        v = j / subdivisions
+        for i in range(n):
+            u = i / subdivisions
+            verts[j * n + i] = corner + edge1 * u + edge2 * v
+            uvs[j * n + i] = [u, v]
+    faces = []
+    for j in range(subdivisions):
+        for i in range(subdivisions):
+            idx = j * n + i
+            faces.append([idx, idx + 1, idx + n + 1])
+            faces.append([idx, idx + n + 1, idx + n])
+    faces = np.array(faces, dtype=np.int32)
+    e1 = verts[1] - verts[0]
+    e2 = verts[n] - verts[0]
+    if np.dot(np.cross(e1, e2), -verts.mean(axis=0)) < 0:
+        faces = faces[:, ::-1]
+    return verts, faces, uvs
+
+
+def _displace_from_depth(verts, depth_map, fx, fy, cx, cy,
+                          max_displacement=0.15):
+    """Displace subdivided vertices toward depth-map-implied 3D positions.
+
+    For each vertex, projects to image space, samples the depth map with
+    bilinear interpolation, reconstructs the implied 3D point, and moves
+    the vertex toward it (clamped to max_displacement metres).
+
+    Returns (displaced_verts, count, mean_displacement, max_displacement_actual).
+    """
+    H, W = depth_map.shape
+    displaced = verts.copy()
+    z = verts[:, 2]
+
+    safe_z = np.where(z > 0.01, z, 1.0)
+    px = fx * verts[:, 0] / safe_z + cx
+    py = fy * verts[:, 1] / safe_z + cy
+
+    ok = (z > 0.01) & (px >= 0) & (px < W - 1) & (py >= 0) & (py < H - 1)
+    ii = np.where(ok)[0]
+    if len(ii) == 0:
+        return displaced, 0, 0.0, 0.0
+
+    pxv, pyv = px[ii], py[ii]
+    x0 = np.floor(pxv).astype(int)
+    y0 = np.floor(pyv).astype(int)
+    x1 = np.minimum(x0 + 1, W - 1)
+    y1 = np.minimum(y0 + 1, H - 1)
+    xf, yf = pxv - x0, pyv - y0
+    sz = (depth_map[y0, x0] * (1 - xf) * (1 - yf) +
+          depth_map[y0, x1] * xf * (1 - yf) +
+          depth_map[y1, x0] * (1 - xf) * yf +
+          depth_map[y1, x1] * xf * yf)
+
+    good = (sz > 0) & np.isfinite(sz)
+    ii, sz, pxv, pyv = ii[good], sz[good], pxv[good], pyv[good]
+    if len(ii) == 0:
+        return displaced, 0, 0.0, 0.0
+
+    actual = np.column_stack([(pxv - cx) / fx * sz,
+                              (pyv - cy) / fy * sz,
+                              sz]).astype(np.float32)
+    delta = actual - verts[ii]
+    dist = np.linalg.norm(delta, axis=1)
+    scale = np.minimum(max_displacement / np.maximum(dist, 1e-9), 1.0)
+    delta *= scale[:, np.newaxis]
+    displaced[ii] = verts[ii] + delta
+
+    final_dist = np.linalg.norm(delta, axis=1)
+    return displaced, len(ii), float(final_dist.mean()), float(final_dist.max())
+
+
 def extract_room_params(planes: list[DetectedPlane], points: np.ndarray) -> dict:
     """Extract room dimensions.
 
@@ -329,11 +419,12 @@ def extract_room_params(planes: list[DetectedPlane], points: np.ndarray) -> dict
     return params
 
 
-def build_room_quads(params: dict) -> list[tuple[str, np.ndarray, np.ndarray]]:
+def build_room_quads(params: dict, subdivisions: int = 1) -> list[tuple[str, np.ndarray, np.ndarray, np.ndarray]]:
     """Build 5 quads (floor, ceiling, 3 walls) from room measurements.
 
     The front wall (behind the camera) is omitted — it's never visible in
     the source image and would just be a solid-color blocker.
+    Returns [(label, verts, faces, uvs), ...].
     """
     fy = params["floor_y"]
     cy = params["ceiling_y"]
@@ -342,24 +433,30 @@ def build_room_quads(params: dict) -> list[tuple[str, np.ndarray, np.ndarray]]:
     fz = params["front_z"]
     bz = params["back_z"]
 
+    def _quad(corner, edge1, edge2):
+        if subdivisions > 1:
+            return _make_subdivided_quad(corner, edge1, edge2, subdivisions)
+        v, f = _make_quad(corner, edge1, edge2)
+        return v, f, np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
+
     quads = []
-    quads.append(("floor", *_make_quad(
+    quads.append(("floor", *_quad(
         np.array([lx, fy, fz]),
         np.array([rx - lx, 0, 0]),
         np.array([0, 0, bz - fz]))))
-    quads.append(("ceiling", *_make_quad(
+    quads.append(("ceiling", *_quad(
         np.array([lx, cy, fz]),
         np.array([rx - lx, 0, 0]),
         np.array([0, 0, bz - fz]))))
-    quads.append(("wall_back", *_make_quad(
+    quads.append(("wall_back", *_quad(
         np.array([lx, cy, bz]),
         np.array([rx - lx, 0, 0]),
         np.array([0, fy - cy, 0]))))
-    quads.append(("wall_left", *_make_quad(
+    quads.append(("wall_left", *_quad(
         np.array([lx, cy, fz]),
         np.array([0, 0, bz - fz]),
         np.array([0, fy - cy, 0]))))
-    quads.append(("wall_right", *_make_quad(
+    quads.append(("wall_right", *_quad(
         np.array([rx, cy, fz]),
         np.array([0, 0, bz - fz]),
         np.array([0, fy - cy, 0]))))
@@ -449,16 +546,34 @@ def build_room_scene(
     planes: list[DetectedPlane],
     points: np.ndarray,
     surface_colors: dict | None = None,
+    depth_map: np.ndarray | None = None,
+    cam_intrinsics: tuple | None = None,
+    subdivisions: int = 1,
+    max_displacement: float = 0.15,
 ) -> "trimesh.Scene":
-    """Build a room box with procedural textures.
+    """Build a room box with procedural textures and optional depth displacement.
 
     surface_colors: {surface_name: {"color": [r,g,b], ...}} from segment_room.py.
-    Falls back to neutral tones if not provided.
+    depth_map + cam_intrinsics: when provided with subdivisions > 1, vertices are
+        displaced toward their depth-map-implied positions for architectural relief.
+    cam_intrinsics: (fx, fy, cx, cy) from depth_to_pointcloud.
     """
     import trimesh
 
     params = extract_room_params(planes, points)
-    quads = build_room_quads(params)
+    quads = build_room_quads(params, subdivisions=subdivisions)
+
+    if depth_map is not None and cam_intrinsics is not None and subdivisions > 1:
+        fx, fy, cx, cy = cam_intrinsics
+        displaced = []
+        for label, verts, faces, uvs in quads:
+            new_verts, count, mean_d, max_d = _displace_from_depth(
+                verts, depth_map, fx, fy, cx, cy, max_displacement)
+            if count:
+                print(f"  {label}: displaced {count} verts "
+                      f"(mean {mean_d * 100:.1f}cm, max {max_d * 100:.1f}cm)")
+            displaced.append((label, new_verts, faces, uvs))
+        quads = displaced
 
     W = params["right_x"] - params["left_x"]
     H = params["floor_y"] - params["ceiling_y"]
@@ -477,24 +592,18 @@ def build_room_scene(
 
     textures = {
         "floor": generate_herringbone(int(W * PPM), int(D * PPM), floor_color),
-        "ceiling": None,
+        "ceiling": generate_wall_texture(int(W * PPM), int(D * PPM), ceil_color),
         "wall_back": generate_wall_texture(int(W * PPM), int(H * PPM), wall_color),
         "wall_left": generate_wall_texture(int(D * PPM), int(H * PPM), wall_color),
         "wall_right": generate_wall_texture(int(D * PPM), int(H * PPM), wall_color),
     }
 
-    rect_uv = np.float32([[0, 0], [1, 0], [1, 1], [0, 1]])
     scene = trimesh.Scene()
-
-    for label, verts, faces in quads:
+    for label, verts, faces, uvs in quads:
         tex = textures.get(label)
-        if tex is not None:
-            visual = trimesh.visual.TextureVisuals(uv=rect_uv, image=tex)
-            mesh = trimesh.Trimesh(vertices=verts, faces=faces,
-                                   visual=visual, process=False)
-        else:
-            mesh = trimesh.Trimesh(vertices=verts, faces=faces, process=False)
-            mesh.visual.face_colors = list(ceil_color) + [255]
+        visual = trimesh.visual.TextureVisuals(uv=uvs, image=tex)
+        mesh = trimesh.Trimesh(vertices=verts, faces=faces,
+                               visual=visual, process=False)
         scene.add_geometry(mesh, geom_name=label)
 
     return scene
@@ -560,6 +669,10 @@ def main() -> None:
                     help="surfaces JSON from segment_room.py (auto-colors)")
     ap.add_argument("--no-texture", action="store_true",
                     help="skip texture projection (solid colors only)")
+    ap.add_argument("--subdivisions", type=int, default=24,
+                    help="wall subdivision grid size for depth displacement (1=flat)")
+    ap.add_argument("--max-displacement", type=float, default=0.15,
+                    help="max depth displacement in metres (default 0.15)")
 
     args = ap.parse_args()
 
@@ -611,7 +724,10 @@ def main() -> None:
     else:
         print("[4/4] building room box (no segmentation, using defaults)...")
 
-    scene = build_room_scene(planes, points, surface_colors=surface_colors)
+    scene = build_room_scene(planes, points, surface_colors=surface_colors,
+                             depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
+                             subdivisions=args.subdivisions,
+                             max_displacement=args.max_displacement)
     out = export_room(scene, args.name, args.scale, args.viewer_dir)
     print("Open the Godot project in godot_viewer/ and press F5 -- it loads "
           "all .glb files automatically.")
