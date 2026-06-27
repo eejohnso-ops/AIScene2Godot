@@ -26,6 +26,7 @@ godot_viewer/*.uid
 godot_viewer/*.gg
 godot_viewer/*_[0-9]*.png
 godot_viewer/*_[0-9]*.jpg
+godot_viewer/*/*.tscn
 .import/
 export.cfg
 export_presets.cfg

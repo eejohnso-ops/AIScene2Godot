@@ -19,30 +19,60 @@ its own gauntlet (see [the setup guide](docs/midi-windows-blackwell-setup.md)).
 
 | Piece | What it is |
 | --- | --- |
+| **`build_scene.py`** | **The main entry point.** One command: photo → segmentation → depth → room shell → objects → walkable Godot scene. Shows step-by-step progress with elapsed time. |
+| **`setup_env.py`** | Automated environment setup. Handles the entire dependency gauntlet (torch, MIDI, nvdiffrast, patches, checkpoints). Run with `--full` for everything. |
 | **`godot_viewer/`** | A minimal Godot 4 project that auto-loads the newest `.glb` in its folder, builds per-object collision, and drops you in with fly + first-person walk modes. The hero. |
-| **`to_godot.py`** | One command: takes an AI scene `.glb`, decimates/scales it, and writes it into the viewer. Keeps objects separate so each gets its own collision. |
+| **`to_godot.py`** | Standalone: takes an AI scene `.glb`, decimates/scales it, and writes it into the viewer. Keeps objects separate so each gets its own collision. |
+| **`room_from_image.py`** | Standalone: room photo → depth-displaced room shell with procedural textures. Now with subdivided walls that capture architectural relief from the depth map. |
+| **`segment_room.py`** | Standalone: SegFormer surface segmentation for wall/floor/ceiling color extraction. |
 | **`docs/midi-windows-blackwell-setup.md`** | The install guide for getting MIDI (+ MV-Adapter texturing) working on Windows/Blackwell. Every wall, every fix. |
 | **`experimental/`** | An honest dead-end: a single-panorama → depth → mesh pipeline. It produces a *shell*, not a usable scene — and the writeup explains exactly why. Kept because the lesson is the point. |
 
 ---
 
-## Quickstart (the MIDI workflow)
+## Quickstart
+
+### One-command pipeline (recommended)
+
+```bash
+python setup_env.py              # install core deps (once)
+python build_scene.py photo.jpg  # room photo -> walkable Godot scene
+```
+
+`build_scene.py` chains segmentation → depth → room shell → export, with
+step-by-step progress and elapsed time. Open `godot_viewer/` in Godot 4 and
+press **F5**.
+
+For MIDI 3D objects too:
+```bash
+python setup_env.py --full                                    # install everything (once)
+python build_scene.py photo.jpg --midi-output path/to/output.glb  # room + objects
+```
+
+For **textured** objects, add `--texture` (best with `--placement depth-align`):
+```bash
+python build_scene.py photo.jpg --midi-output path/to/output.glb \
+    --placement depth-align --texture
+```
+`--texture` runs MV-Adapter per object (~2-3 min each) in the MIDI venv, inside
+the VS Build Tools env so the triton/nvdiffrast CUDA kernels can compile — paths
+default to the standard install but are overridable with `--vcvars`/`--cuda-bin`.
+Per-object results (`mesh_<i>_shaded.glb`) are cached under `<midi-out>/tex/` and
+reused on reruns; pass `--retexture` to force a rebuild.
+
+### Manual workflow (individual scripts)
 
 1. **Generate a scene** with [MIDI](https://github.com/VAST-AI-Research/MIDI-3D)
    from a single image — you get an `output.glb` of separate object meshes.
-   (Optionally run MIDI's textured pipeline for `textured_scene.glb`.)
 
 2. **Make it game-ready and load it:**
    ```bash
-   pip install trimesh numpy fast-simplification
    python to_godot.py path/to/output.glb --name my_scene
    ```
-   Untextured meshes get decimated to a game budget; textured scenes are scaled
-   only (so UVs survive). The result lands in `godot_viewer/`.
 
-3. **Walk it.** Open `godot_viewer/` in Godot 4 and press **F5**. It auto-loads
-   the newest `.glb`. Controls: mouse to look, **WASD** to move, **Space/Shift**
-   up/down (fly), **F** to toggle fly/walk, **Esc** to free the cursor.
+3. **Walk it.** Open `godot_viewer/` in Godot 4 and press **F5**. Controls:
+   mouse to look, **WASD** to move, **Space/Shift** up/down (fly), **F** to
+   toggle fly/walk, **Esc** to free the cursor.
 
 That's it — image to walkable, textured, per-object scene.
 
@@ -64,6 +94,17 @@ That's it — image to walkable, textured, per-object scene.
 
 Point `to_godot.py --viewer-dir` at any Godot project to reuse the loader
 elsewhere.
+
+### Editing in the Godot editor (hand-arrange)
+
+The viewer loads GLBs **at runtime by script**, so they don't appear in the
+editor's scene tree (only when you press F5). For that reason each
+`build_scene.py` run also writes `godot_viewer/<name>/<name>.tscn` — a scene that
+statically instances the GLB. **Double-click that `.tscn`** in Godot's FileSystem
+dock to see the assembled room + objects in the editor. To hand-arrange: select
+the instanced child, right-click → **Editable Children**, move objects with the
+gizmo, and save the `.tscn`. (Opening the raw `.glb` instead shows a read-only
+preview.)
 
 ---
 
