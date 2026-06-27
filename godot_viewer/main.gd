@@ -51,18 +51,61 @@ func _setup_environment() -> void:
 	add_child(sun)
 
 func _find_all_glbs() -> Array[String]:
+	# Find the newest project subfolder (each build_scene.py run creates one).
+	# Falls back to root-level .glb files for backward compat with to_godot.py.
 	var dir := DirAccess.open("res://")
-	var glbs: Array[String] = []
-	if dir:
-		dir.list_dir_begin()
-		var f := dir.get_next()
-		while f != "":
-			if not dir.current_is_dir() and f.to_lower().ends_with(".glb"):
-				glbs.append("res://" + f)
-			f = dir.get_next()
-		dir.list_dir_end()
-	glbs.sort()
-	return glbs
+	if not dir:
+		return []
+
+	# Scan subdirectories for the newest .glb
+	var best_folder := ""
+	var best_time := -1
+	var root_glbs: Array[String] = []
+
+	dir.list_dir_begin()
+	var f := dir.get_next()
+	while f != "":
+		if dir.current_is_dir() and not f.begins_with("."):
+			var sub := DirAccess.open("res://" + f)
+			if sub:
+				sub.list_dir_begin()
+				var sf := sub.get_next()
+				while sf != "":
+					if not sub.current_is_dir() and sf.to_lower().ends_with(".glb"):
+						var full := "res://" + f + "/" + sf
+						var t := FileAccess.get_modified_time(full)
+						if t > best_time:
+							best_time = t
+							best_folder = f
+					sf = sub.get_next()
+				sub.list_dir_end()
+		elif not dir.current_is_dir() and f.to_lower().ends_with(".glb"):
+			root_glbs.append("res://" + f)
+		f = dir.get_next()
+	dir.list_dir_end()
+
+	# Prefer the newest project subfolder over root-level files
+	if best_folder != "":
+		var glbs: Array[String] = []
+		var sub := DirAccess.open("res://" + best_folder)
+		if sub:
+			sub.list_dir_begin()
+			var sf := sub.get_next()
+			while sf != "":
+				if not sub.current_is_dir() and sf.to_lower().ends_with(".glb"):
+					glbs.append("res://" + best_folder + "/" + sf)
+				sf = sub.get_next()
+			sub.list_dir_end()
+		# Check if any root-level glb is newer (e.g. a to_godot.py drop)
+		for rg in root_glbs:
+			if FileAccess.get_modified_time(rg) > best_time:
+				glbs.append(rg)
+		print("Project: ", best_folder)
+		glbs.sort()
+		return glbs
+
+	root_glbs.sort()
+	return root_glbs
 
 func _load_scenes() -> Array[Node]:
 	var paths := _find_all_glbs()
@@ -155,6 +198,14 @@ func _add_catch_floor() -> void:
 	add_child(vis)
 
 func _spawn_player() -> void:
+	# Spawn at the room entrance (max Z = where the source camera was), facing
+	# inward (-Z). This makes the scene look like the original photo on load.
 	var player := preload("res://player.tscn").instantiate()
-	player.position = Vector3(0, 0.5, 0)
+	if _have_spawn:
+		var eye_y := _room_min.y + 1.6
+		var entrance_z := _room_max.z - 0.8
+		player.position = Vector3(0.0, eye_y, entrance_z)
+		# rotation.y = 0: Godot's default forward is -Z, which points into the room
+	else:
+		player.position = Vector3(0.0, 0.5, 0.0)
 	add_child(player)

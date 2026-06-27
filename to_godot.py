@@ -44,8 +44,17 @@ def main() -> None:
     ap.add_argument("--viewer-dir", default=os.path.join(os.path.dirname(__file__),
                                                          "godot_viewer"),
                     help="Godot project dir to drop the result into")
-    ap.add_argument("--name", default="ai_scene", help="output GLB base name")
+    ap.add_argument("--name", default=None,
+                    help="project name (creates a subfolder; prompts if omitted)")
     args = ap.parse_args()
+
+    if args.name is None:
+        default = os.path.splitext(os.path.basename(args.glb))[0]
+        try:
+            answer = input(f"Project name [{default}]: ").strip()
+        except EOFError:
+            answer = ""
+        args.name = answer if answer else default
 
     scene = trimesh.load(args.glb, process=False)
     if not isinstance(scene, trimesh.Scene):
@@ -88,13 +97,15 @@ def main() -> None:
         shift[1, 3] = -bounds[0][1]
         out_scene.apply_transform(shift)
 
-    os.makedirs(args.viewer_dir, exist_ok=True)
-    out_path = os.path.join(args.viewer_dir, f"{args.name}.glb")
+    project_dir = os.path.join(args.viewer_dir, args.name)
+    os.makedirs(project_dir, exist_ok=True)
+    out_path = os.path.join(project_dir, f"{args.name}.glb")
     out_scene.export(out_path)
     mb = os.path.getsize(out_path) / 1e6
     print(f"\nwrote {out_path}  ({mb:.1f} MB)")
+    print(f"Project folder: {project_dir}")
     print("Open the Godot project in godot_viewer/ and press F5 -- it loads the "
-          "newest .glb automatically.")
+          "newest project automatically.")
 
 
 if __name__ == "__main__":
