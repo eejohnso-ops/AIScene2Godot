@@ -163,6 +163,23 @@ def wall_segments(rooms: list[dict], ceiling_h: float) -> dict:
     return segs
 
 
+def _door_opening(edge, door) -> tuple[float, float, bool]:
+    """Resolve a door spec to a sized (lo, hi, full_bay) opening along a wall edge,
+    clamped to leave jambs. `full_bay` is True when the door is too wide for the
+    wall (minus margins) and the whole bay is opened. Geometry only -- the door
+    height is clamped to the wall height by the caller."""
+    _, _, slo, shi = edge
+    width = float(door.get("width", DEFAULT_DOOR["width"]))
+    offset = float(door.get("offset", DEFAULT_DOOR["offset"]))
+    span = shi - slo
+    if width >= span - 2 * MARGIN:            # opening wider than wall -> full bay
+        return slo, shi, True
+    half = width / 2.0
+    center = (slo + shi) / 2.0 + offset
+    center = min(max(center, slo + MARGIN + half), shi - MARGIN - half)
+    return center - half, center + half, False
+
+
 def attach_doorways(segs: dict, rooms: list[dict], doors: list[dict]) -> None:
     """Resolve each door to a sized opening on the wall segment(s) it passes
     through, clamped to leave jambs."""
@@ -177,20 +194,11 @@ def attach_doorways(segs: dict, rooms: list[dict], doors: list[dict]) -> None:
                   f"skipping door (check pos/size so they abut exactly).")
             continue
         axis, coord, slo, shi = edge
-        width = float(door.get("width", DEFAULT_DOOR["width"]))
+        dlo, dhi, full = _door_opening(edge, door)
         height = float(door.get("height", DEFAULT_DOOR["height"]))
-        offset = float(door.get("offset", DEFAULT_DOOR["offset"]))
-
-        span = shi - slo
-        if width >= span - 2 * MARGIN:        # opening wider than wall -> full bay
-            dlo, dhi = slo, shi
-            print(f"  note: door {a}<->{b} width {width:g}m >= wall {span:g}m; "
-                  f"opening full bay.")
-        else:
-            half = width / 2.0
-            center = (slo + shi) / 2.0 + offset
-            center = min(max(center, slo + MARGIN + half), shi - MARGIN - half)
-            dlo, dhi = center - half, center + half
+        if full:
+            print(f"  note: door {a}<->{b} width {dhi - dlo:g}m >= wall "
+                  f"{shi - slo:g}m; opening full bay.")
 
         matched = False
         for seg in segs.values():
@@ -200,7 +208,7 @@ def attach_doorways(segs: dict, rooms: list[dict], doors: list[dict]) -> None:
                                      "height": min(height, seg["height"])})
                 matched = True
         if matched:
-            print(f"  door: {a!r}<->{b!r} opening {width:g}x{height:g}m "
+            print(f"  door: {a!r}<->{b!r} opening {dhi - dlo:g}x{height:g}m "
                   f"on {axis}={coord:g}, span [{dlo:.2f},{dhi:.2f}]")
         else:
             print(f"  WARNING: no wall segment found for door {a!r}<->{b!r}.")
@@ -533,7 +541,12 @@ def build_dwelling(spec: dict, *, reconstruct: bool = False,
                for rid, meshes in recon_meshes.items()}
     door_edges = {rid: set() for rid in recon_ids}
 
-    # Conformed reconstructed rooms tile, so a door opens the shared wall on each.
+    # Conformed reconstructed rooms tile, so a door cuts the shared wall. Both
+    # rooms' depth-displaced walls on the seam are dropped and replaced with ONE
+    # clean deduped wall segment carrying a sized opening (jambs + lintel), so the
+    # join is a real doorway instead of a full-bay hole. The clean wall on the seam
+    # also closes the corners against the perpendicular reconstructed walls.
+    door_walls = 0
     for dr in recon_doors:
         a, b = dr["between"]
         edge = shared_edge(rects[a], rects[b])
@@ -548,7 +561,18 @@ def build_dwelling(spec: dict, *, reconstruct: bool = False,
             if wname:
                 del recon_meshes[rid][wname]
             door_edges[rid].add((axis, round(coord, 3)))
-        print(f"  door: opened shared wall between {a!r} and {b!r} (reconstructed)")
+
+        dlo, dhi, full = _door_opening(edge, dr)
+        height = min(float(dr.get("height", DEFAULT_DOOR["height"])), ceiling_h)
+        seg = {"axis": axis, "coord": coord, "lo": lo, "hi": hi,
+               "height": ceiling_h, "color": _color(by_id[a].get("colors", {}), "wall"),
+               "doors": [{"lo": dlo, "hi": dhi, "height": height}]}
+        for mesh in build_wall_meshes(seg, thickness):
+            scene.add_geometry(mesh, geom_name=f"door_{a}_{b}_{door_walls}")
+            door_walls += 1
+        kind = "full bay" if full else f"{dhi - dlo:g}x{height:g}m"
+        print(f"  door: {a!r}<->{b!r} sized opening ({kind}) on "
+              f"{axis}={coord:g} (reconstructed)")
 
     # Merge reconstructed room meshes. In conform mode, swap the depth-displaced
     # floor/ceiling for clean spec-footprint quads so rooms tile without seam gaps;

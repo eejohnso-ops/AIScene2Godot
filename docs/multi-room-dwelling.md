@@ -176,11 +176,15 @@ The best-of-both: keep real reconstructed geometry **and** get clean tiling. Wit
 footprint** (a new `Placement.target_size`: stretch local X/Z to width/depth,
 normalize Y to the ceiling, all *before* yaw). Rooms then occupy exactly their
 floor-plan rectangles and tile like box rooms, while keeping their photo textures
-and (mildly stretched) depth relief. A door between two reconstructed rooms opens
-the **shared wall** on each (`_nearest_wall_name` finds the wall facing the shared
-edge and drops it) for a walk-through. Verified non-GPU: the scale lands a room at
-exactly its spec footprint (yaw 0 and 90), and the door-drop removes both walls at
-the shared boundary, leaving a clean opening.
+and (mildly stretched) depth relief. A door between two reconstructed rooms is a
+**sized doorway**, matching box mode: both rooms' depth-displaced walls on the seam
+are dropped (`_nearest_wall_name` finds the wall facing the shared edge), then one
+clean deduped wall segment is built on the seam carrying a sized opening (jambs +
+lintel via `_door_opening` + `build_wall_meshes`) instead of a full-bay hole. The
+clean seam wall also closes the corners against the perpendicular reconstructed
+walls. Verified non-GPU: the scale lands a room at exactly its spec footprint (yaw 0
+and 90); both displaced seam walls are removed (no double wall); and the seam gets a
+0.9 m-wide opening with jambs and a lintel, the room staying capped/watertight.
 
 In conform mode the floor and ceiling are emitted as **clean flat quads at the
 exact spec footprint** (not the depth-displaced versions), so adjacent rooms tile
@@ -206,10 +210,11 @@ no door opens gets a clean flat wall (`--no-cap` to leave it open). So a conform
 room ends up enclosed except where a door opens a shared wall.
 
 The honest cost: stretching relief to a footprint it wasn't measured at distorts it
-slightly (displacement is clamped, so it stays subtle), and the opening is a full
-bay, not a sized doorway. If a reconstructed room's open (camera-side) wall happens
-to face the shared edge, the drop targets the nearest *remaining* wall — author
-`yaw` so solid walls face the join. Run:
+slightly (displacement is clamped, so it stays subtle). The seam doorway is a clean,
+flat (non-relief) wall — the reconstructed relief is only on the other walls. If a
+reconstructed room's open (camera-side) wall happens to face the shared edge, the
+drop targets the nearest *remaining* wall — author `yaw` so solid walls face the
+join. Run:
 ```bash
 python build_dwelling.py examples/dwelling_reconstruct.json --reconstruct --conform
 ```
