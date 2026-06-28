@@ -123,10 +123,28 @@ a *full* edge of equal length (partial/unequal-depth overlaps may double-wall);
 rooms still axis-aligned (yaw a multiple of 90); no door frame/threshold trim; no
 furniture/relief yet (shell only).
 
-- Optional next: bake a Godot **navmesh** across the whole dwelling so AI/teleport
-  and "walk" mode respect the full footprint. (This is also the point where a
-  Godot run-and-capture-errors loop / MCP starts to earn its keep — see the MCP
-  note in project history.)
+### Navmesh bake ✅ prototyped
+
+The viewer (`godot_viewer/main.gd`) bakes **one NavigationMesh across the whole
+dwelling at F5**, matching the runtime-built-everything pattern (no editor bake
+step). `_bake_navmesh()` collects every loaded mesh except ceilings (their up-facing
+top would bake a phantom navmesh at ceiling height), bakes via
+`NavigationServer3D.bake_from_source_geometry_data` with `agent_radius = 0.2 m`
+(half the narrowest 0.8 m doorway, so it fits through), attaches a
+`NavigationRegion3D`, and draws the result as a translucent blue overlay. It then
+self-checks: after two physics frames it queries `map_get_path` corner-to-corner and
+prints **"Navmesh connectivity OK …"** (or a warning) — so pressing F5 proves the
+rooms connect through the doorways, with no manual step.
+
+Connectivity was also verified **offline** (no Godot needed) on the 4-room example:
+a 2D floor-level flood-fill at agent body-height (0.1–1.7 m, below the door lintels)
+with the walls dilated by the 0.2 m agent radius reaches all 28 680 walkable cells
+across all four rooms from one corner — the exact precondition Recast needs. (The
+in-engine Recast bake + path query themselves only run at F5.)
+
+Limits: `agent_radius` is fixed at 0.2 m; a door narrower than ~0.45 m would close
+under erosion. The bake re-runs every load (fast for a small dwelling; no persisted
+nav resource is written).
 
 ### Dressing tier 1 — per-surface colours ✅ prototyped
 

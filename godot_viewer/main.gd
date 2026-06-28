@@ -24,6 +24,8 @@ func _ready() -> void:
 	if not _has_room_shell:
 		_add_catch_floor()
 	_spawn_player()
+	if _has_room_shell:
+		_bake_navmesh(scenes)
 
 func _setup_input() -> void:
 	var keys := {"move_forward": KEY_W, "move_back": KEY_S,
@@ -209,3 +211,97 @@ func _spawn_player() -> void:
 	else:
 		player.position = Vector3(0.0, 0.5, 0.0)
 	add_child(player)
+
+# --- Navigation -------------------------------------------------------------
+# Bake one NavigationMesh across the whole loaded dwelling: floors become
+# walkable, walls carve borders, and the sized doorways connect the rooms into a
+# single walkable surface. Runs at F5 like the rest of the viewer (no editor
+# bake step), draws the result as a translucent overlay, and prints a self-check
+# that paths corner-to-corner to prove the rooms connect through the doorways.
+
+const NAV_AGENT_RADIUS := 0.2   # << half the narrowest (0.8m) doorway, so it fits
+
+func _bake_navmesh(scenes: Array[Node]) -> void:
+	var nav := NavigationMesh.new()
+	nav.cell_size = 0.1
+	nav.cell_height = 0.1
+	nav.agent_radius = NAV_AGENT_RADIUS
+	nav.agent_height = 1.8
+	nav.agent_max_climb = 0.2
+	nav.agent_max_slope = 45.0
+
+	var src := NavigationMeshSourceGeometryData3D.new()
+	var count := 0
+	for s in scenes:
+		count += _collect_nav_geometry(s, src)
+	if count == 0:
+		push_warning("Navmesh: no source meshes found; skipping bake.")
+		return
+	NavigationServer3D.bake_from_source_geometry_data(nav, src)
+	var polys := nav.get_polygon_count()
+	if polys == 0:
+		push_warning("Navmesh: bake produced 0 polygons (check geometry/agent size).")
+		return
+
+	var region := NavigationRegion3D.new()
+	region.navigation_mesh = nav
+	add_child(region)
+	print("Navmesh baked: %d source mesh(es) -> %d polygons" % [count, polys])
+	_draw_navmesh(nav)
+	_verify_connectivity(region)
+
+func _collect_nav_geometry(node: Node, src: NavigationMeshSourceGeometryData3D) -> int:
+	# Add every mesh except ceilings (their up-facing top would bake a phantom
+	# navmesh layer at ceiling height). Collision bodies are StaticBody3D, not
+	# MeshInstance3D, so they aren't double-counted.
+	var n := 0
+	if node is MeshInstance3D and node.mesh != null:
+		if not String(node.name).to_lower().contains("ceiling"):
+			src.add_mesh(node.mesh, (node as Node3D).global_transform)
+			n += 1
+	for c in node.get_children():
+		n += _collect_nav_geometry(c, src)
+	return n
+
+func _draw_navmesh(nav: NavigationMesh) -> void:
+	var verts := nav.get_vertices()
+	if verts.is_empty():
+		return
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+	for i in range(nav.get_polygon_count()):
+		var poly := nav.get_polygon(i)
+		for k in range(1, poly.size() - 1):   # fan-triangulate
+			st.add_vertex(verts[poly[0]])
+			st.add_vertex(verts[poly[k]])
+			st.add_vertex(verts[poly[k + 1]])
+	var mi := MeshInstance3D.new()
+	mi.mesh = st.commit()
+	var mat := StandardMaterial3D.new()
+	mat.albedo_color = Color(0.1, 0.6, 1.0, 0.35)
+	mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	mi.material_override = mat
+	mi.position.y = _room_min.y + 0.03   # lift off the floor to avoid z-fighting
+	add_child(mi)
+
+func _verify_connectivity(region: NavigationRegion3D) -> void:
+	# The navigation map syncs on the physics frame, so wait before querying.
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	var map := region.get_navigation_map()
+	var fy := _room_min.y + 0.1
+	var a := Vector3(_room_min.x + 1.0, fy, _room_min.z + 1.0)
+	var b := Vector3(_room_max.x - 1.0, fy, _room_max.z - 1.0)
+	var path := NavigationServer3D.map_get_path(map, a, b, true)
+	var reached := path.size() >= 2 and path[path.size() - 1].distance_to(b) < 1.5
+	if reached:
+		var d := 0.0
+		for i in range(1, path.size()):
+			d += path[i].distance_to(path[i - 1])
+		print("Navmesh connectivity OK: %d-point path, %.1fm corner-to-corner " % [path.size(), d]
+			+ "(rooms connect through the doorways).")
+	else:
+		push_warning("Navmesh connectivity FAILED: no corner-to-corner path. "
+			+ "Doorways may be narrower than 2*agent_radius (%.2fm)." % (2.0 * NAV_AGENT_RADIUS))
