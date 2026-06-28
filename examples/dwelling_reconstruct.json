@@ -1,0 +1,22 @@
+{
+  "name": "recon_demo",
+  "ceiling_height": 2.6,
+  "wall_thickness": 0.12,
+  "rooms": [
+    {
+      "id": "room_a",
+      "pos": [0, 0],
+      "yaw": 0,
+      "size": [5, 4],
+      "image": "../godot_viewer/demo_depthalign/source.png"
+    },
+    {
+      "id": "room_b",
+      "pos": [6, 0],
+      "yaw": 180,
+      "size": [5, 4],
+      "image": "../godot_viewer/demo_midifit/source.png"
+    }
+  ],
+  "doors": []
+}

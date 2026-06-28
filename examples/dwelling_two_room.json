@@ -1,0 +1,24 @@
+{
+  "name": "twobr",
+  "ceiling_height": 2.6,
+  "wall_thickness": 0.12,
+  "rooms": [
+    {
+      "id": "living",
+      "pos": [0, 0],
+      "yaw": 0,
+      "size": [5, 4],
+      "colors": {"wall": [150, 140, 130], "floor": [120, 90, 60], "ceiling": [210, 205, 200]}
+    },
+    {
+      "id": "kitchen",
+      "pos": [4, 0],
+      "yaw": 0,
+      "size": [3, 4],
+      "surfaces": "kitchen_surfaces.json"
+    }
+  ],
+  "doors": [
+    {"between": ["living", "kitchen"], "width": 0.9, "height": 2.1, "offset": 0.0}
+  ]
+}
