@@ -132,6 +132,9 @@ func _load_scenes() -> Array[Node]:
 func _process_meshes(node: Node) -> void:
 	if node is MeshInstance3D and node.mesh != null:
 		node.create_trimesh_collision()
+		# Unshaded + double-sided: surfaces show their (flat, de-lit) albedo from
+		# inside the room. Dynamic shading of these thin double-sided shells drops
+		# out back/exterior faces, so we keep the simple unshaded look.
 		for i in range(node.mesh.get_surface_count()):
 			var m = node.mesh.surface_get_material(i)
 			if m is BaseMaterial3D:

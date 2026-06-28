@@ -398,7 +398,9 @@ def _reconstruct_room_meshes(room: dict, ceiling_h: float, scale: float,
         hfov=recon["hfov"],
         surface_colors=_surfaces_from_colors(room.get("colors")),
         subdivisions=recon["subdivisions"],
-        max_displacement=recon["max_displacement"])
+        max_displacement=recon["max_displacement"],
+        project_walls=recon.get("project_walls", False),
+        sample_walls=recon.get("sample_walls", False))
     placement = Placement(
         pos=tuple(room["pos"]), yaw=float(room.get("yaw", 0)),
         target_height=ceiling_h,
@@ -564,7 +566,12 @@ def build_dwelling(spec: dict, *, reconstruct: bool = False,
 
         dlo, dhi, full = _door_opening(edge, dr)
         height = min(float(dr.get("height", DEFAULT_DOOR["height"])), ceiling_h)
-        seg = {"axis": axis, "coord": coord, "lo": lo, "hi": hi,
+        # build_wall_meshes extends each end by thickness/2 to fill box-mode corners;
+        # in the reconstructed case the perpendicular walls already sit on the
+        # footprint edge, so pre-shrink the span by that much to land flush instead
+        # of poking a nub outside the shell.
+        seg = {"axis": axis, "coord": coord,
+               "lo": lo + thickness / 2.0, "hi": hi - thickness / 2.0,
                "height": ceiling_h, "color": _color(by_id[a].get("colors", {}), "wall"),
                "doors": [{"lo": dlo, "hi": dhi, "height": height}]}
         for mesh in build_wall_meshes(seg, thickness):
@@ -668,6 +675,14 @@ def main() -> None:
     ap.add_argument("--no-cap", action="store_true",
                     help="with --conform, leave each reconstructed room's open "
                          "camera-side front open instead of capping it with a wall")
+    ap.add_argument("--project-walls", action="store_true",
+                    help="with --reconstruct, texture each room's walls by "
+                         "projecting its source photo onto them (real wall imagery) "
+                         "instead of a flat procedural tint")
+    ap.add_argument("--sample-walls", action="store_true",
+                    help="with --reconstruct, tint each room's walls with the "
+                         "robust flat-wall colour sampled from genuine wall pixels "
+                         "only (depth+semantics mask; no furniture/shadow bleed)")
     ap.add_argument("--checkpoint",
                     default=os.path.join(os.path.dirname(__file__), "checkpoints",
                                          "depth_anything_v2_metric_hypersim_vitl.pth"),
@@ -699,7 +714,9 @@ def main() -> None:
     dress_rooms(spec, spec_dir, project_dir, args.segment, args.resegment)
     print(f"[2/3] building rooms...")
     recon = {"hfov": args.hfov, "subdivisions": args.subdivisions,
-             "max_displacement": args.max_displacement}
+             "max_displacement": args.max_displacement,
+             "project_walls": args.project_walls,
+             "sample_walls": args.sample_walls}
     scene = build_dwelling(spec, reconstruct=args.reconstruct,
                            checkpoint=args.checkpoint, scale=args.scale,
                            recon=recon, conform=args.conform, cap=not args.no_cap)

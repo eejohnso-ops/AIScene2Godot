@@ -241,9 +241,68 @@ python build_dwelling.py examples/dwelling_reconstruct.json --reconstruct --conf
 is uniformly rescaled so its ceiling matches, which also cancels the pre-placement
 `--scale` (leave it at 1.0). This is the §4 fix, applied automatically.
 
-**Richer still (future):** per-wall photo *projection* onto spec walls (so you get
-real geometry *and* clean tiling) needs camera-pose↔wall correspondence — a Level-B
-CV task left for later.
+### Per-wall photo projection ✅ prototyped (`--project-walls`)
+
+Instead of tinting each wall with a flat procedural texture, project the **source
+photo itself** onto the walls (`room_from_image.py --project-walls`, or
+`build_dwelling.py --reconstruct --project-walls`). The camera↔wall correspondence
+that the doc flagged as the hard "Level-B" part is actually **free here**: the room
+is reconstructed in the camera's own frame (camera at the origin, OpenCV axes), so
+every wall vertex projects straight back into the image via the pinhole forward
+model `(u,v) = (fx·x/z + cx, fy·y/z + cy)` (`_project_uvs`). Each subdivided wall
+vertex gets its own UV, so the relief is textured with real per-vertex parallax.
+
+Crucially the UVs are computed in the camera frame **before** scale/flip/yaw/conform,
+and UVs are invariant under those vertex transforms — so the photo stays correctly
+mapped even when a room is non-uniformly stretched to its spec footprint. That's the
+"real texture *and* clean tiling" win: projection fixes the texture, conform fixes
+the tiling, and they compose. Floor and ceiling stay procedural (too furniture-
+occluded to project cleanly).
+
+**Honest limit:** only the wall the camera faces head-on (typically `wall_back`)
+gets a crisp projection (it fills the centre of the image). **Side walls are
+foreshortened** in a single photo, so they map to a thin strip at the image edge —
+low-res and stretched — and verts the camera never saw clamp to the image border
+(decal smear). The front wall is omitted entirely (never seen). So projection is a
+clear upgrade for the facing wall and a stretchy approximation for the grazing ones;
+multi-view or inpainting would be the next step. Verified end-to-end on the GPU
+(`examples/dwelling_reconstruct.json --reconstruct --conform --project-walls`): both
+rooms' reconstructed walls carry the 1216×832 photo (back-wall UV centred at
+~[0.15–0.79]×[0.16–0.66]); floor/ceiling/caps/doorway remain procedural.
+
+### Inferring flat wall vs object, and the wall texture that actually works
+
+Raw projection paints furniture/hangings onto the walls, so the better question is:
+*which pixels are genuine flat wall?* Both signals we need are already computed:
+
+- **Geometry (`wall_mask.py`):** `detect_planes()` already fits the wall planes.
+  Back-project each pixel and compare its depth to the nearest wall plane along that
+  ray — `≈0` is flat wall, **in front** of the plane is an object *against* the wall,
+  gated so the nearest plane overall is a wall (not floor/ceiling).
+- **Semantics:** SegFormer `wall` confirms it and flags near-coplanar **hangings**
+  (paintings/windows/curtains) that geometry alone would call flat.
+
+Fused, this cleanly separates flat wall from furniture (debug: `python wall_mask.py
+photo.png` → 4-panel overlay). **The honest finding:** a single photo only exposes
+~20 % genuine flat wall — furniture occludes the rest — so you can't *recover* a
+whole wall from one view. We tried: classical inpaint smears; SDXL diffusion inpaint
+(`wall_inpaint.py` rectify-to-head-on + `comfy_inpaint.py` two-phase ComfyUI client,
+GPU-safe: torch phase exits before the no-torch ComfyUI phase) **hallucinates a whole
+furnished room back into the wall** at full denoise, and merely preserves the smear
+at low denoise. Root cause is data scarcity (70–98 % occluded), not tuning.
+
+**What ships (`--sample-walls`):** for *plain* painted walls (all our rooms), the
+best-looking result has no inpainting at all. Per wall, rectify to head-on, sample a
+robust base colour from flat-wall pixels only (median, dropping the dark/bright 10 %
+— no furniture/shadow/hanging bleed), and modulate it by the photo's **real
+low-frequency lighting** (holes smeared then heavily blurred, so only the smooth
+gradient survives — the high-frequency smear artifacts blur away). Plus faint grain.
+The result is a clean, naturally-lit wall — not dead-flat, no furniture, no artifacts
+(`build_dwelling.py --reconstruct --conform --sample-walls`; GPU-verified: each wall
+gets a baked wall-sized texture, e.g. 501×269, not the raw photo). Diffusion inpaint
+only pays off on **patterned** walls (wallpaper/brick/mural) with real texture to
+propagate — the tooling is kept for that case. Precedence in `build_room_scene`:
+`--sample-walls` (bake) → `--project-walls` (raw) → procedural tint.
 
 ### Phase 3 — Reduce manual authoring
 
