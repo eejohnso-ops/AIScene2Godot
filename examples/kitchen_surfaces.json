@@ -1,0 +1,6 @@
+{
+  "wall": {"color": [96, 128, 116], "area_pct": 38.5},
+  "floor": {"color": [176, 168, 150], "area_pct": 22.1},
+  "ceiling": {"color": [212, 210, 205], "area_pct": 14.0},
+  "window": {"color": [150, 190, 220], "area_pct": 6.0}
+}

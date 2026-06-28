@@ -377,6 +377,23 @@ def _displace_from_depth(verts, depth_map, fx, fy, cx, cy,
     return displaced, len(ii), float(final_dist.mean()), float(final_dist.max())
 
 
+def _pin_boundary(displaced, original, subdivisions):
+    """Reset a subdivided quad's perimeter vertices to their undisplaced positions.
+
+    Depth displacement pulls a wall's edges inward (up to max_displacement), so
+    neighbouring walls -- and the floor/ceiling/cap -- no longer meet, leaving gaps
+    that fail a watertightness test. Pinning the four edges back to the clean
+    rectangle keeps the interior relief while making walls span corner-to-corner.
+    """
+    n = subdivisions + 1
+    idx = np.arange(n * n)
+    i, j = idx % n, idx // n
+    boundary = (i == 0) | (i == n - 1) | (j == 0) | (j == n - 1)
+    out = displaced.copy()
+    out[boundary] = original[boundary]
+    return out
+
+
 def extract_room_params(planes: list[DetectedPlane], points: np.ndarray) -> dict:
     """Extract room dimensions.
 
@@ -565,10 +582,22 @@ def build_room_scene(
 
     if depth_map is not None and cam_intrinsics is not None and subdivisions > 1:
         fx, fy, cx, cy = cam_intrinsics
+        # Clamp relief inside the room's clean box: pin edges flush AND keep
+        # displacement from pushing interior verts *outside* the box. Otherwise the
+        # box bounds inflate, and a later conform-to-footprint scale (build_dwelling)
+        # shrinks the shell so the clean edges fall short of the floor/cap -> gaps.
+        box_min = np.array([params["left_x"],
+                            min(params["floor_y"], params["ceiling_y"]),
+                            params["front_z"]], dtype=np.float32)
+        box_max = np.array([params["right_x"],
+                            max(params["floor_y"], params["ceiling_y"]),
+                            params["back_z"]], dtype=np.float32)
         displaced = []
         for label, verts, faces, uvs in quads:
             new_verts, count, mean_d, max_d = _displace_from_depth(
                 verts, depth_map, fx, fy, cx, cy, max_displacement)
+            new_verts = _pin_boundary(new_verts, verts, subdivisions)
+            new_verts = np.clip(new_verts, box_min, box_max)
             if count:
                 print(f"  {label}: displaced {count} verts "
                       f"(mean {mean_d * 100:.1f}cm, max {max_d * 100:.1f}cm)")
@@ -609,8 +638,88 @@ def build_room_scene(
     return scene
 
 
-def export_room(scene, name: str, scale: float, viewer_dir: str) -> str:
-    """Scale the scene, center at origin, export GLB."""
+@dataclass
+class Placement:
+    """Where a room sits in the shared dwelling frame (Godot coords, floor Y=0).
+
+    pos:           world (x, z) of the room centre, in metres.
+    yaw:           rotation about the Y axis, in degrees.
+    target_height: if set (and target_size is None), uniformly rescale the room so
+                   its floor->ceiling height equals this value. Floor-to-ceiling is
+                   the most reliably reconstructed dimension, so matching it to a
+                   shared constant keeps rooms at a consistent scale even when
+                   absolute metric depth drifts between photos.
+    target_size:   if set as (width, depth), *non-uniformly* rescale the room's
+                   local X/Z to exactly these extents (and Y to target_height).
+                   This "conforms" a depth-reconstructed room to its spec footprint
+                   so it tiles with its neighbours -- trading a little relief
+                   distortion (displacement is clamped, so it stays subtle) for a
+                   room that fits the floor plan. Applied before yaw, so the spec's
+                   (width, depth) map to local X/Z regardless of orientation.
+    """
+    pos: tuple[float, float] = (0.0, 0.0)
+    yaw: float = 0.0
+    target_height: float | None = None
+    target_size: tuple[float, float] | None = None
+
+
+def placement_matrix(pos: tuple[float, float] = (0.0, 0.0),
+                     yaw: float = 0.0) -> np.ndarray:
+    """4x4 that yaws about Y then translates to world (x, z). Floor stays at Y=0."""
+    import trimesh
+    R = trimesh.transformations.rotation_matrix(np.radians(yaw), [0, 1, 0])
+    T = np.eye(4)
+    T[0, 3] = pos[0]
+    T[2, 3] = pos[1]
+    return T @ R
+
+
+def _center_floor_matrix(scene) -> np.ndarray:
+    """Centre the scene on the XZ origin with its floor at Y=0."""
+    bounds = scene.bounds
+    center = (bounds[0] + bounds[1]) / 2.0
+    shift = np.eye(4)
+    shift[0, 3] = -center[0]
+    shift[1, 3] = -bounds[0][1]  # floor at Y=0
+    shift[2, 3] = -center[2]
+    return shift
+
+
+def place_room(scene, placement: Placement) -> None:
+    """Position an already-Godot-framed room scene per `placement`, in place.
+
+    Order: normalise height -> centre on XZ origin with floor at Y=0 -> yaw +
+    translate to the room's slot. Shared by the single-room exporter and the
+    multi-room dwelling builder so both compose into the same frame.
+    """
+    import trimesh
+    if placement.target_size is not None:
+        ext = scene.bounds[1] - scene.bounds[0]
+        sx = placement.target_size[0] / ext[0] if ext[0] > 1e-6 else 1.0
+        sz = placement.target_size[1] / ext[2] if ext[2] > 1e-6 else 1.0
+        if placement.target_height and ext[1] > 1e-6:
+            sy = placement.target_height / ext[1]
+        else:
+            sy = (sx + sz) / 2.0
+        scene.apply_transform(np.diag([sx, sy, sz, 1.0]))
+    elif placement.target_height:
+        h = scene.bounds[1][1] - scene.bounds[0][1]
+        if h > 1e-6:
+            scene.apply_transform(
+                trimesh.transformations.scale_matrix(placement.target_height / h))
+    scene.apply_transform(_center_floor_matrix(scene))
+    scene.apply_transform(placement_matrix(placement.pos, placement.yaw))
+
+
+def export_room(scene, name: str, scale: float, viewer_dir: str,
+                placement: "Placement | None" = None) -> str:
+    """Scale the scene into Godot's frame and export a GLB.
+
+    With no `placement`, the room is centred at the origin (floor at Y=0) so
+    MIDI objects at the origin land inside it — the original single-room
+    behaviour. With a `placement`, the room is positioned into its slot in a
+    shared dwelling frame instead (see `build_dwelling.py`).
+    """
     import trimesh
 
     scene.apply_transform(trimesh.transformations.scale_matrix(scale))
@@ -619,15 +728,10 @@ def export_room(scene, name: str, scale: float, viewer_dir: str) -> str:
     flip = np.diag([1.0, -1.0, -1.0, 1.0])
     scene.apply_transform(flip)
 
-    # Center horizontally and depth-wise so MIDI objects (at origin) land
-    # inside the room. Keep floor at Y=0.
-    bounds = scene.bounds
-    center = (bounds[0] + bounds[1]) / 2.0
-    shift = np.eye(4)
-    shift[0, 3] = -center[0]
-    shift[1, 3] = -bounds[0][1]  # floor at Y=0
-    shift[2, 3] = -center[2]
-    scene.apply_transform(shift)
+    if placement is None:
+        scene.apply_transform(_center_floor_matrix(scene))
+    else:
+        place_room(scene, placement)
 
     os.makedirs(viewer_dir, exist_ok=True)
     out_path = os.path.join(viewer_dir, f"{name}.glb")
@@ -636,6 +740,50 @@ def export_room(scene, name: str, scale: float, viewer_dir: str) -> str:
     mb = os.path.getsize(out_path) / 1e6
     print(f"\nwrote {out_path}  ({mb:.1f} MB)")
     return out_path
+
+
+# ============================================================================
+# RECONSTRUCTION (reusable: photo -> textured, depth-displaced shell)
+# ============================================================================
+
+def reconstruct_room_scene(image: str, checkpoint: str, *,
+                           hfov: float = 60.0,
+                           surface_colors: dict | None = None,
+                           subdivisions: int = 24,
+                           max_displacement: float = 0.15,
+                           min_plane_points: int = 5000,
+                           ransac_threshold: float = 0.02,
+                           max_planes: int = 8):
+    """Run the full photo -> room-shell reconstruction and return a textured,
+    depth-displaced trimesh.Scene in the **camera frame** (before scale/flip/
+    placement). Stages mirror the CLI; callers apply scale+flip+placement.
+
+    Used both by this script's CLI (single room) and by build_dwelling.py, which
+    drops the result into a floor-plan slot via `place_room()`.
+    """
+    print("  [1/4] estimating depth...")
+    depth, rgb = estimate_depth(image, checkpoint)
+    print(f"    depth range: {depth.min():.2f} - {depth.max():.2f} m  "
+          f"({rgb.shape[1]}x{rgb.shape[0]} px)")
+
+    print("  [2/4] building point cloud...")
+    points, colors, fx, fy, cx, cy = depth_to_pointcloud(depth, rgb, hfov)
+    print(f"    {len(points)} valid points")
+
+    print("  [3/4] detecting planes...")
+    planes = detect_planes(points, min_plane_points, ransac_threshold, max_planes)
+    if len(planes) < 2:
+        print(f"    only {len(planes)} plane(s) found, using box fallback")
+        planes = box_fallback(points)
+    classify_planes(planes, points)
+    print(f"    {len(planes)} planes: "
+          + ", ".join(f"{p.label} ({len(p.inlier_indices)} pts)" for p in planes))
+
+    print("  [4/4] building textured, depth-displaced shell...")
+    return build_room_scene(planes, points, surface_colors=surface_colors,
+                            depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
+                            subdivisions=subdivisions,
+                            max_displacement=max_displacement)
 
 
 # ============================================================================
@@ -678,37 +826,13 @@ def main() -> None:
 
     if not os.path.isfile(args.image):
         sys.exit(f"Image not found: {args.image}")
-
-    # --- Stage 1: depth ---
-    print("[1/4] estimating depth...")
     if not os.path.isfile(args.checkpoint):
         sys.exit(
             f"Checkpoint not found: {args.checkpoint}\n"
             "Download the DepthAnything V2 metric indoor ViT-L checkpoint:\n"
             "  https://huggingface.co/depth-anything/Depth-Anything-V2-Metric-Hypersim-Large"
         )
-    depth, rgb = estimate_depth(args.image, args.checkpoint)
-    print(f"  depth range: {depth.min():.2f} - {depth.max():.2f} m  "
-          f"({rgb.shape[1]}x{rgb.shape[0]} px)")
 
-    # --- Stage 2: point cloud ---
-    print("[2/4] building point cloud...")
-    points, colors, fx, fy, cx, cy = depth_to_pointcloud(depth, rgb, args.hfov)
-    print(f"  {len(points)} valid points")
-
-    # --- Stage 3: planes ---
-    print("[3/4] detecting planes...")
-    planes = detect_planes(points, args.min_plane_points,
-                           args.ransac_threshold, args.max_planes)
-
-    if len(planes) < 2:
-        print(f"  only {len(planes)} plane(s) found, using box fallback")
-        planes = box_fallback(points)
-    classify_planes(planes, points)
-    print(f"  {len(planes)} planes: "
-          + ", ".join(f"{p.label} ({len(p.inlier_indices)} pts)" for p in planes))
-
-    # --- Stage 4-6: mesh + texture + export ---
     surface_colors = None
     if args.surfaces:
         import json
@@ -716,18 +840,17 @@ def main() -> None:
             sys.exit(f"Surfaces JSON not found: {args.surfaces}")
         with open(args.surfaces) as f:
             surface_colors = json.load(f)
-        print(f"[4/4] building room box from segmentation colors...")
         for name in ("wall", "floor", "ceiling"):
             if name in surface_colors:
                 c = surface_colors[name]["color"]
                 print(f"  {name}: RGB({c[0]},{c[1]},{c[2]})")
-    else:
-        print("[4/4] building room box (no segmentation, using defaults)...")
 
-    scene = build_room_scene(planes, points, surface_colors=surface_colors,
-                             depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
-                             subdivisions=args.subdivisions,
-                             max_displacement=args.max_displacement)
+    scene = reconstruct_room_scene(
+        args.image, args.checkpoint, hfov=args.hfov,
+        surface_colors=surface_colors, subdivisions=args.subdivisions,
+        max_displacement=args.max_displacement,
+        min_plane_points=args.min_plane_points,
+        ransac_threshold=args.ransac_threshold, max_planes=args.max_planes)
     out = export_room(scene, args.name, args.scale, args.viewer_dir)
     print("Open the Godot project in godot_viewer/ and press F5 -- it loads "
           "all .glb files automatically.")

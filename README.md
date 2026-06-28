@@ -24,6 +24,7 @@ its own gauntlet (see [the setup guide](docs/midi-windows-blackwell-setup.md)).
 | **`godot_viewer/`** | A minimal Godot 4 project that auto-loads the newest `.glb` in its folder, builds per-object collision, and drops you in with fly + first-person walk modes. The hero. |
 | **`to_godot.py`** | Standalone: takes an AI scene `.glb`, decimates/scales it, and writes it into the viewer. Keeps objects separate so each gets its own collision. |
 | **`room_from_image.py`** | Standalone: room photo → depth-displaced room shell with procedural textures. Now with subdivided walls that capture architectural relief from the depth map. |
+| **`build_dwelling.py`** | Compose **several rooms into one walkable dwelling** from a floor-plan spec: thick deduped walls + sized doorways (box mode), or full depth-reconstructed room shells dropped into slots (`--reconstruct`). See [Multi-room dwellings](#multi-room-dwellings). |
 | **`segment_room.py`** | Standalone: SegFormer surface segmentation for wall/floor/ceiling color extraction. |
 | **`docs/midi-windows-blackwell-setup.md`** | The install guide for getting MIDI (+ MV-Adapter texturing) working on Windows/Blackwell. Every wall, every fix. |
 | **`experimental/`** | An honest dead-end: a single-panorama → depth → mesh pipeline. It produces a *shell*, not a usable scene — and the writeup explains exactly why. Kept because the lesson is the point. |
@@ -75,6 +76,41 @@ reused on reruns; pass `--retexture` to force a rebuild.
    toggle fly/walk, **Esc** to free the cursor.
 
 That's it — image to walkable, textured, per-object scene.
+
+---
+
+## Multi-room dwellings
+
+`build_dwelling.py` composes **several rooms into one walkable scene** from a
+floor-plan spec (rooms with position/yaw/size + a door graph). It's the path from
+single rooms toward a complete dwelling. Full design + roadmap:
+[`docs/multi-room-dwelling.md`](docs/multi-room-dwelling.md).
+
+```bash
+python build_dwelling.py examples/dwelling_two_room.json          # box-shell dwelling
+python build_dwelling.py examples/dwelling_reconstruct.json --reconstruct   # real reconstructed rooms
+```
+Then open `godot_viewer/` and press **F5** — it loads the newest dwelling folder.
+
+Two composition modes, one spec:
+
+- **Box mode (default).** Each room is a clean box with **thick, deduped walls**
+  (shared walls built once, no z-fighting) and **sized doorways** cut where the
+  spec's door graph says. Rooms **tile and connect cleanly**. No GPU needed —
+  geometry is the spec; the photo only *dresses* surfaces.
+- **Reconstruct mode (`--reconstruct`).** Each room with an `image` is built as a
+  **full depth-reconstructed shell** (textured + depth relief) placed into its
+  slot, normalized to a shared ceiling height. You get real per-room geometry, but
+  each room keeps its **depth-derived footprint**, so rooms **don't tile/connect
+  cleanly** — you hand-arrange the join in Godot. (Needs the DepthAnything
+  checkpoint + GPU; missing/failed reconstruction falls back to a box shell.)
+
+**Dressing.** Per-room wall/floor/ceiling colours resolve from (priority) explicit
+`colors` → a precomputed `surfaces` JSON (from `segment_room.py`) → live
+segmentation of the room's `image` (`--segment`) → defaults. The shell stays
+spec-driven; the photo tints it.
+
+See `examples/dwelling_two_room.json` and `examples/dwelling_reconstruct.json`.
 
 ---
 
