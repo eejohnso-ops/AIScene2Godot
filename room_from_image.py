@@ -377,6 +377,23 @@ def _displace_from_depth(verts, depth_map, fx, fy, cx, cy,
     return displaced, len(ii), float(final_dist.mean()), float(final_dist.max())
 
 
+def _pin_boundary(displaced, original, subdivisions):
+    """Reset a subdivided quad's perimeter vertices to their undisplaced positions.
+
+    Depth displacement pulls a wall's edges inward (up to max_displacement), so
+    neighbouring walls -- and the floor/ceiling/cap -- no longer meet, leaving gaps
+    that fail a watertightness test. Pinning the four edges back to the clean
+    rectangle keeps the interior relief while making walls span corner-to-corner.
+    """
+    n = subdivisions + 1
+    idx = np.arange(n * n)
+    i, j = idx % n, idx // n
+    boundary = (i == 0) | (i == n - 1) | (j == 0) | (j == n - 1)
+    out = displaced.copy()
+    out[boundary] = original[boundary]
+    return out
+
+
 def extract_room_params(planes: list[DetectedPlane], points: np.ndarray) -> dict:
     """Extract room dimensions.
 
@@ -565,10 +582,22 @@ def build_room_scene(
 
     if depth_map is not None and cam_intrinsics is not None and subdivisions > 1:
         fx, fy, cx, cy = cam_intrinsics
+        # Clamp relief inside the room's clean box: pin edges flush AND keep
+        # displacement from pushing interior verts *outside* the box. Otherwise the
+        # box bounds inflate, and a later conform-to-footprint scale (build_dwelling)
+        # shrinks the shell so the clean edges fall short of the floor/cap -> gaps.
+        box_min = np.array([params["left_x"],
+                            min(params["floor_y"], params["ceiling_y"]),
+                            params["front_z"]], dtype=np.float32)
+        box_max = np.array([params["right_x"],
+                            max(params["floor_y"], params["ceiling_y"]),
+                            params["back_z"]], dtype=np.float32)
         displaced = []
         for label, verts, faces, uvs in quads:
             new_verts, count, mean_d, max_d = _displace_from_depth(
                 verts, depth_map, fx, fy, cx, cy, max_displacement)
+            new_verts = _pin_boundary(new_verts, verts, subdivisions)
+            new_verts = np.clip(new_verts, box_min, box_max)
             if count:
                 print(f"  {label}: displaced {count} verts "
                       f"(mean {mean_d * 100:.1f}cm, max {max_d * 100:.1f}cm)")

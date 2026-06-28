@@ -188,6 +188,17 @@ edge-to-edge with no seam gap; only the **walls** keep their reconstructed relie
 (Without this, the displaced floor edges pull ~10–15 cm inside the footprint and,
 once the shared wall is dropped, leave a visible gap at the join.)
 
+The reconstructed **walls** are kept watertight in `room_from_image.build_room_scene`
+by two steps on the depth-displaced verts: **pin** each subdivided wall's perimeter
+back to the clean rectangle (`_pin_boundary`), and **clamp** all verts inside the
+room's clean box (relief becomes inward-only dents). Pinning alone isn't enough:
+displacement also pushes *interior* verts ~10–15 cm *outside* the box, which
+inflates the bounding box; the conform-to-footprint scale then divides by that
+inflated box and the clean edges land short of the floor/cap. Clamping forces the
+box bounds to equal the clean box, so conform maps it exactly onto the spec
+footprint and every wall meets the floor, ceiling, cap, and its neighbours. (Both
+steps also improve single-room `room_from_image` output.)
+
 Reconstruction omits the camera-side front wall (no depth there), which in a
 dwelling would leave each room open to the outside. In conform mode the open front
 is **capped** by default: the footprint edge that no reconstructed wall covers and
