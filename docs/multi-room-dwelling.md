@@ -163,12 +163,45 @@ The alternative to spec geometry: drop a **full depth-reconstructed room shell**
   fallback, both normalized to a 2.60 m ceiling with floors welded to Y=0 and
   placed at their slots (room_b at X=6).
 
-**The accepted trade:** reconstructed rooms keep their own depth-derived footprint,
-so they **don't tile or connect cleanly** — `pos`/`yaw` position them, but walls
-won't line up and doorways aren't cut (a door touching a reconstructed room joins
-by overlap, not a sized opening; the script notes this). Use the spec-box path
-(Phases 1–2) when you need clean tiling/doors; use `--reconstruct` when you want
-real per-room geometry and will hand-arrange the join in Godot.
+**The accepted trade (plain `--reconstruct`):** reconstructed rooms keep their own
+depth-derived footprint, so they **don't tile or connect cleanly** — `pos`/`yaw`
+position them, but walls won't line up and doorways aren't cut. Use the spec-box
+path (Phases 1–2) when you need clean tiling/doors; use plain `--reconstruct` when
+you want real per-room geometry and will hand-arrange the join in Godot.
+
+### Conform-to-spec-footprint (`--reconstruct --conform`) ✅ built
+
+The best-of-both: keep real reconstructed geometry **and** get clean tiling. With
+`--conform`, each reconstructed room is **non-uniformly scaled to its spec `size`
+footprint** (a new `Placement.target_size`: stretch local X/Z to width/depth,
+normalize Y to the ceiling, all *before* yaw). Rooms then occupy exactly their
+floor-plan rectangles and tile like box rooms, while keeping their photo textures
+and (mildly stretched) depth relief. A door between two reconstructed rooms opens
+the **shared wall** on each (`_nearest_wall_name` finds the wall facing the shared
+edge and drops it) for a walk-through. Verified non-GPU: the scale lands a room at
+exactly its spec footprint (yaw 0 and 90), and the door-drop removes both walls at
+the shared boundary, leaving a clean opening.
+
+In conform mode the floor and ceiling are emitted as **clean flat quads at the
+exact spec footprint** (not the depth-displaced versions), so adjacent rooms tile
+edge-to-edge with no seam gap; only the **walls** keep their reconstructed relief.
+(Without this, the displaced floor edges pull ~10–15 cm inside the footprint and,
+once the shared wall is dropped, leave a visible gap at the join.)
+
+Reconstruction omits the camera-side front wall (no depth there), which in a
+dwelling would leave each room open to the outside. In conform mode the open front
+is **capped** by default: the footprint edge that no reconstructed wall covers and
+no door opens gets a clean flat wall (`--no-cap` to leave it open). So a conformed
+room ends up enclosed except where a door opens a shared wall.
+
+The honest cost: stretching relief to a footprint it wasn't measured at distorts it
+slightly (displacement is clamped, so it stays subtle), and the opening is a full
+bay, not a sized doorway. If a reconstructed room's open (camera-side) wall happens
+to face the shared edge, the drop targets the nearest *remaining* wall — author
+`yaw` so solid walls face the join. Run:
+```bash
+python build_dwelling.py examples/dwelling_reconstruct.json --reconstruct --conform
+```
 
 **Scale consistency** is handled by `target_height` = `ceiling_height`: each room
 is uniformly rescaled so its ceiling matches, which also cancels the pre-placement

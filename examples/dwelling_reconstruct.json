@@ -12,11 +12,13 @@
     },
     {
       "id": "room_b",
-      "pos": [6, 0],
+      "pos": [5, 0],
       "yaw": 180,
       "size": [5, 4],
       "image": "../godot_viewer/demo_midifit/source.png"
     }
   ],
-  "doors": []
+  "doors": [
+    {"between": ["room_a", "room_b"]}
+  ]
 }

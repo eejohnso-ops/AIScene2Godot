@@ -615,15 +615,23 @@ class Placement:
 
     pos:           world (x, z) of the room centre, in metres.
     yaw:           rotation about the Y axis, in degrees.
-    target_height: if set, uniformly rescale the room so its floor->ceiling
-                   height equals this value. Floor-to-ceiling is the most
-                   reliably reconstructed dimension, so matching it to a shared
-                   constant keeps multiple rooms at a consistent scale even when
+    target_height: if set (and target_size is None), uniformly rescale the room so
+                   its floor->ceiling height equals this value. Floor-to-ceiling is
+                   the most reliably reconstructed dimension, so matching it to a
+                   shared constant keeps rooms at a consistent scale even when
                    absolute metric depth drifts between photos.
+    target_size:   if set as (width, depth), *non-uniformly* rescale the room's
+                   local X/Z to exactly these extents (and Y to target_height).
+                   This "conforms" a depth-reconstructed room to its spec footprint
+                   so it tiles with its neighbours -- trading a little relief
+                   distortion (displacement is clamped, so it stays subtle) for a
+                   room that fits the floor plan. Applied before yaw, so the spec's
+                   (width, depth) map to local X/Z regardless of orientation.
     """
     pos: tuple[float, float] = (0.0, 0.0)
     yaw: float = 0.0
     target_height: float | None = None
+    target_size: tuple[float, float] | None = None
 
 
 def placement_matrix(pos: tuple[float, float] = (0.0, 0.0),
@@ -656,7 +664,16 @@ def place_room(scene, placement: Placement) -> None:
     multi-room dwelling builder so both compose into the same frame.
     """
     import trimesh
-    if placement.target_height:
+    if placement.target_size is not None:
+        ext = scene.bounds[1] - scene.bounds[0]
+        sx = placement.target_size[0] / ext[0] if ext[0] > 1e-6 else 1.0
+        sz = placement.target_size[1] / ext[2] if ext[2] > 1e-6 else 1.0
+        if placement.target_height and ext[1] > 1e-6:
+            sy = placement.target_height / ext[1]
+        else:
+            sy = (sx + sz) / 2.0
+        scene.apply_transform(np.diag([sx, sy, sz, 1.0]))
+    elif placement.target_height:
         h = scene.bounds[1][1] - scene.bounds[0][1]
         if h > 1e-6:
             scene.apply_transform(

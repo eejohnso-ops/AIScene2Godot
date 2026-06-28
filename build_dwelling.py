@@ -329,6 +329,23 @@ def build_wall_meshes(seg: dict, thickness: float) -> list:
     return meshes
 
 
+def _floor_ceiling_meshes(room: dict, ceiling_h: float):
+    """Clean flat floor + ceiling quads spanning the room's exact spec footprint.
+    Used for box rooms and for conformed reconstructed rooms (whose depth-displaced
+    floors don't reach the footprint edge, which would leave gaps at the seams)."""
+    x0, x1, z0, z1 = world_rect(room)
+    w, d = x1 - x0, z1 - z0
+    colors = room.get("colors", {})
+    floor = _quad_mesh([(x0, 0, z0), (x1, 0, z0), (x1, 0, z1), (x0, 0, z1)],
+                       generate_herringbone(_tex_px(w), _tex_px(d),
+                                            _color(colors, "floor")))
+    ceil = _quad_mesh([(x0, ceiling_h, z0), (x1, ceiling_h, z0),
+                       (x1, ceiling_h, z1), (x0, ceiling_h, z1)],
+                      generate_wall_texture(_tex_px(w), _tex_px(d),
+                                            _color(colors, "ceiling")))
+    return floor, ceil
+
+
 def _surfaces_from_colors(colors: dict) -> dict | None:
     """Adapt a {wall/floor/ceiling: (r,g,b)} dict into the surfaces shape that
     room_from_image.build_room_scene expects ({name: {"color": [...]}})."""
@@ -337,13 +354,12 @@ def _surfaces_from_colors(colors: dict) -> dict | None:
     return {k: {"color": list(v)} for k, v in colors.items()}
 
 
-def _place_and_merge(combined, room_scene, placement, scale: float,
-                     prefix: str) -> int:
+def _place_room_meshes(room_scene, placement, scale: float) -> dict:
     """Scale a camera-frame room scene into Godot's frame, position it into its
-    slot via `place_room`, then bake graph transforms into the vertices and copy
-    each geometry into `combined`. Baking (not graph transforms) is required so
-    the merged meshes survive into the exported GLB -- and keeping them separate
-    preserves the viewer's per-mesh collision."""
+    slot via `place_room`, then bake graph transforms into the vertices. Returns
+    {geometry_name: world-space Trimesh}. Baking (not graph transforms) is required
+    so the meshes survive the merge; returning them separately lets the caller drop
+    a shared wall before merging, and preserves the viewer's per-mesh collision."""
     import trimesh
     from room_from_image import place_room
 
@@ -351,22 +367,22 @@ def _place_and_merge(combined, room_scene, placement, scale: float,
     room_scene.apply_transform(np.diag([1.0, -1.0, -1.0, 1.0]))  # camera -> Godot
     place_room(room_scene, placement)
 
-    n = 0
+    out = {}
     for name in list(room_scene.geometry.keys()):
         mesh = room_scene.geometry[name].copy()
         tf = room_scene.graph.get(name)
         if tf is not None and tf[0] is not None:
             mesh.apply_transform(tf[0])
-        combined.add_geometry(mesh, geom_name=f"{prefix}_{name}")
-        n += 1
-    return n
+        out[name] = mesh
+    return out
 
 
-def _reconstruct_into(combined, room: dict, ceiling_h: float, scale: float,
-                      checkpoint: str, recon: dict) -> int:
-    """Reconstruct one room from its photo and drop the textured, depth-displaced
-    shell into its floor-plan slot (pos/yaw), normalized to the shared ceiling
-    height so rooms stay at a consistent scale."""
+def _reconstruct_room_meshes(room: dict, ceiling_h: float, scale: float,
+                             checkpoint: str, recon: dict, conform: bool) -> dict:
+    """Reconstruct one room from its photo into its floor-plan slot (pos/yaw),
+    normalized to the shared ceiling height. With conform=True the room is also
+    stretched to its spec `size` footprint so it tiles with its neighbours.
+    Returns {geometry_name: world-space Trimesh}."""
     from room_from_image import Placement, reconstruct_room_scene
 
     cam_scene = reconstruct_room_scene(
@@ -375,10 +391,56 @@ def _reconstruct_into(combined, room: dict, ceiling_h: float, scale: float,
         surface_colors=_surfaces_from_colors(room.get("colors")),
         subdivisions=recon["subdivisions"],
         max_displacement=recon["max_displacement"])
-    placement = Placement(pos=tuple(room["pos"]), yaw=float(room.get("yaw", 0)),
-                          target_height=ceiling_h)
-    return _place_and_merge(combined, cam_scene, placement, scale,
-                            prefix=f"{room['id']}_recon")
+    placement = Placement(
+        pos=tuple(room["pos"]), yaw=float(room.get("yaw", 0)),
+        target_height=ceiling_h,
+        target_size=tuple(room["size"]) if conform else None)
+    return _place_room_meshes(cam_scene, placement, scale)
+
+
+def _room_edges(rect) -> list:
+    """The four footprint edges as (axis, coord): the planes a room's walls sit on."""
+    x0, x1, z0, z1 = rect
+    return [("x", round(x0, 3)), ("x", round(x1, 3)),
+            ("z", round(z0, 3)), ("z", round(z1, 3))]
+
+
+def _nearest_edge(cx: float, cz: float, rect) -> tuple:
+    """Which footprint edge a wall (at world centroid cx,cz) sits on."""
+    x0, x1, z0, z1 = rect
+    cands = [(("x", round(x0, 3)), abs(cx - x0)), (("x", round(x1, 3)), abs(cx - x1)),
+             (("z", round(z0, 3)), abs(cz - z0)), (("z", round(z1, 3)), abs(cz - z1))]
+    return min(cands, key=lambda c: c[1])[0]
+
+
+def _cap_wall_mesh(rect, edge, ceiling_h: float, color: tuple):
+    """A clean flat wall quad spanning a footprint edge, floor to ceiling -- used to
+    close a reconstructed room's open (camera-side) front so it's enclosed."""
+    x0, x1, z0, z1 = rect
+    axis, coord = edge
+    H = ceiling_h
+    if axis == "x":
+        corners = [(coord, 0, z0), (coord, 0, z1), (coord, H, z1), (coord, H, z0)]
+        tex = generate_wall_texture(_tex_px(z1 - z0), _tex_px(H), color)
+    else:
+        corners = [(x0, 0, coord), (x1, 0, coord), (x1, H, coord), (x0, H, coord)]
+        tex = generate_wall_texture(_tex_px(x1 - x0), _tex_px(H), color)
+    return _quad_mesh(corners, tex)
+
+
+def _nearest_wall_name(meshes: dict, midpoint) -> str | None:
+    """Name of the wall_* geometry whose world centroid (in XZ) is closest to
+    `midpoint` -- the wall facing a neighbour, to be opened for a doorway."""
+    mx, mz = midpoint
+    best, best_d = None, float("inf")
+    for name, mesh in meshes.items():
+        if not name.startswith("wall"):
+            continue
+        c = mesh.vertices.mean(axis=0)
+        d = (c[0] - mx) ** 2 + (c[2] - mz) ** 2
+        if d < best_d:
+            best, best_d = name, d
+    return best
 
 
 def _abs_image(room: dict) -> str:
@@ -387,14 +449,17 @@ def _abs_image(room: dict) -> str:
 
 def build_dwelling(spec: dict, *, reconstruct: bool = False,
                    checkpoint: str | None = None, scale: float = 1.0,
-                   recon: dict | None = None):
+                   recon: dict | None = None, conform: bool = False,
+                   cap: bool = True):
     """Compose all rooms into a single trimesh.Scene in the shared frame.
 
     With reconstruct=True, any room that has an `image` (and a usable checkpoint)
-    is built as a full depth-reconstructed shell placed into its slot, instead of
-    a flat box. Such rooms keep their own (depth-derived) footprint, so they may
-    not tile or connect cleanly -- that's the accepted trade for real geometry.
-    Other rooms fall back to spec box shells with deduped thick walls + doorways.
+    is built as a full depth-reconstructed shell placed into its slot. By default
+    such rooms keep their own depth-derived footprint, so they may not tile or
+    connect. With conform=True they are stretched to their spec `size` footprint,
+    so reconstructed rooms tile like box rooms and a door between two of them opens
+    the shared wall (full bay) for a walk-through. Rooms without an image fall back
+    to spec box shells with deduped thick walls + sized doorways.
     """
     import trimesh
 
@@ -402,59 +467,116 @@ def build_dwelling(spec: dict, *, reconstruct: bool = False,
     thickness = float(spec.get("wall_thickness", DEFAULT_THICKNESS))
     recon = recon or {}
     rooms = spec["rooms"]
-    if len({r["id"] for r in rooms}) != len(rooms):
+    by_id = {r["id"]: r for r in rooms}
+    if len(by_id) != len(rooms):
         sys.exit("Duplicate room id in spec.")
 
     scene = trimesh.Scene()
-    box_rooms = []  # rooms still built as spec box shells (get walls + doorways)
+    box_rooms = []                 # built as spec box shells (walls + doorways)
+    recon_meshes: dict[str, dict] = {}  # room_id -> {geom_name: world Trimesh}
 
     for r in rooms:
-        do_recon = (reconstruct and r.get("image") and checkpoint
-                    and os.path.isfile(checkpoint))
-        if reconstruct and r.get("image") and not (checkpoint
-                                                    and os.path.isfile(checkpoint)):
+        ckpt_ok = bool(checkpoint and os.path.isfile(checkpoint))
+        if reconstruct and r.get("image") and not ckpt_ok:
             print(f"  WARNING: --reconstruct set but checkpoint missing "
                   f"({checkpoint}); building {r['id']!r} as a box shell.")
-        if do_recon:
+        if reconstruct and r.get("image") and ckpt_ok:
             try:
                 print(f"  room {r['id']!r}: reconstructing from "
                       f"{os.path.basename(_abs_image(r))} ...")
-                n = _reconstruct_into(scene, r, ceiling_h, scale, checkpoint, recon)
-                print(f"    placed {n} mesh(es) @ pos {r['pos']} "
-                      f"yaw {r.get('yaw', 0)} (footprint from depth)")
+                meshes = _reconstruct_room_meshes(r, ceiling_h, scale,
+                                                  checkpoint, recon, conform)
+                recon_meshes[r["id"]] = meshes
+                tag = ("conformed to spec footprint" if conform
+                       else "footprint from depth")
+                print(f"    placed {len(meshes)} mesh(es) @ pos {r['pos']} "
+                      f"yaw {r.get('yaw', 0)} ({tag})")
                 continue
             except Exception as e:
                 print(f"  WARNING: reconstruction failed for {r['id']!r} "
                       f"({type(e).__name__}: {e}); falling back to box shell.")
 
         # Box-shell room: floor + ceiling now, walls after dedup.
-        x0, x1, z0, z1 = world_rect(r)
-        w, d = x1 - x0, z1 - z0
-        colors = r.get("colors", {})
-        floor = _quad_mesh([(x0, 0, z0), (x1, 0, z0), (x1, 0, z1), (x0, 0, z1)],
-                           generate_herringbone(_tex_px(w), _tex_px(d),
-                                                _color(colors, "floor")))
-        ceil = _quad_mesh([(x0, ceiling_h, z0), (x1, ceiling_h, z0),
-                           (x1, ceiling_h, z1), (x0, ceiling_h, z1)],
-                          generate_wall_texture(_tex_px(w), _tex_px(d),
-                                                _color(colors, "ceiling")))
+        floor, ceil = _floor_ceiling_meshes(r, ceiling_h)
         scene.add_geometry(floor, geom_name=f"{r['id']}_floor")
         scene.add_geometry(ceil, geom_name=f"{r['id']}_ceiling")
         box_rooms.append(r)
-        print(f"  room {r['id']!r}: box {w:g}x{d:g}m @ pos {r['pos']} "
+        x0, x1, z0, z1 = world_rect(r)
+        print(f"  room {r['id']!r}: box {x1 - x0:g}x{z1 - z0:g}m @ pos {r['pos']} "
               f"yaw {r.get('yaw', 0)}")
 
-    # Walls (deduped) + sized doorways -- box rooms only. Reconstructed rooms keep
-    # their own walls, so doors that touch one can't be cut cleanly here.
+    # Sort doors by which rooms they connect.
     box_ids = {r["id"] for r in box_rooms}
-    doors = [dr for dr in spec.get("doors", [])
-             if set(dr["between"]) <= box_ids]
-    skipped = [dr for dr in spec.get("doors", []) if set(dr["between"]) > box_ids]
-    for dr in skipped:
-        print(f"  note: door {dr['between']} touches a reconstructed room; "
-              f"no doorway cut (rooms join by overlap, not a sized opening).")
+    recon_ids = set(recon_meshes)
+    box_doors, recon_doors, mixed_doors = [], [], []
+    for dr in spec.get("doors", []):
+        pair = set(dr["between"])
+        if pair <= box_ids:
+            box_doors.append(dr)
+        elif conform and pair <= recon_ids:
+            recon_doors.append(dr)
+        else:
+            mixed_doors.append(dr)
+    for dr in mixed_doors:
+        why = ("a reconstructed room is not conformed" if not conform
+               else "it joins a reconstructed and a box room")
+        print(f"  note: door {dr['between']} not cut ({why}); rooms join by overlap.")
+
+    rects = {rid: world_rect(by_id[rid]) for rid in recon_ids}
+
+    # Which footprint edge each room's walls cover (computed before any door drop,
+    # while all 3 reconstructed walls are present). The uncovered edge is the open
+    # camera-side front.
+    covered = {rid: {_nearest_edge(m.vertices.mean(0)[0], m.vertices.mean(0)[2],
+                                    rects[rid])
+                     for n, m in meshes.items() if n.startswith("wall")}
+               for rid, meshes in recon_meshes.items()}
+    door_edges = {rid: set() for rid in recon_ids}
+
+    # Conformed reconstructed rooms tile, so a door opens the shared wall on each.
+    for dr in recon_doors:
+        a, b = dr["between"]
+        edge = shared_edge(rects[a], rects[b])
+        if edge is None:
+            print(f"  WARNING: reconstructed rooms {a!r},{b!r} share no edge; "
+                  f"door skipped.")
+            continue
+        axis, coord, lo, hi = edge
+        mid = (coord, (lo + hi) / 2) if axis == "x" else ((lo + hi) / 2, coord)
+        for rid in (a, b):
+            wname = _nearest_wall_name(recon_meshes[rid], mid)
+            if wname:
+                del recon_meshes[rid][wname]
+            door_edges[rid].add((axis, round(coord, 3)))
+        print(f"  door: opened shared wall between {a!r} and {b!r} (reconstructed)")
+
+    # Merge reconstructed room meshes. In conform mode, swap the depth-displaced
+    # floor/ceiling for clean spec-footprint quads so rooms tile without seam gaps;
+    # keep the reconstructed walls (their relief is the point). Optionally cap each
+    # room's open front (the footprint edge no wall covers and no door opens).
+    for rid, meshes in recon_meshes.items():
+        if conform:
+            meshes.pop("floor", None)
+            meshes.pop("ceiling", None)
+            floor, ceil = _floor_ceiling_meshes(by_id[rid], ceiling_h)
+            scene.add_geometry(floor, geom_name=f"{rid}_floor")
+            scene.add_geometry(ceil, geom_name=f"{rid}_ceiling")
+            if cap:
+                wall_c = _color(by_id[rid].get("colors", {}), "wall")
+                open_edges = (set(_room_edges(rects[rid]))
+                              - covered[rid] - door_edges[rid])
+                for i, edge in enumerate(sorted(open_edges)):
+                    scene.add_geometry(
+                        _cap_wall_mesh(rects[rid], edge, ceiling_h, wall_c),
+                        geom_name=f"{rid}_cap{i}")
+                if open_edges:
+                    print(f"  capped {len(open_edges)} open side(s) of {rid!r}")
+        for name, mesh in meshes.items():
+            scene.add_geometry(mesh, geom_name=f"{rid}_recon_{name}")
+
+    # Box-room walls (deduped) + sized doorways.
     segs = wall_segments(box_rooms, ceiling_h)
-    attach_doorways(segs, box_rooms, doors)
+    attach_doorways(segs, box_rooms, box_doors)
     n = 0
     for seg in segs.values():
         for mesh in build_wall_meshes(seg, thickness):
@@ -515,6 +637,13 @@ def main() -> None:
                          "reconstructed shells placed into their slots (needs the "
                          "DepthAnything checkpoint + GPU). Footprints come from "
                          "depth, so reconstructed rooms may not tile/connect.")
+    ap.add_argument("--conform", action="store_true",
+                    help="with --reconstruct, stretch each reconstructed room to "
+                         "its spec `size` footprint so rooms tile and doors between "
+                         "two reconstructed rooms open the shared wall (walk-through)")
+    ap.add_argument("--no-cap", action="store_true",
+                    help="with --conform, leave each reconstructed room's open "
+                         "camera-side front open instead of capping it with a wall")
     ap.add_argument("--checkpoint",
                     default=os.path.join(os.path.dirname(__file__), "checkpoints",
                                          "depth_anything_v2_metric_hypersim_vitl.pth"),
@@ -549,7 +678,7 @@ def main() -> None:
              "max_displacement": args.max_displacement}
     scene = build_dwelling(spec, reconstruct=args.reconstruct,
                            checkpoint=args.checkpoint, scale=args.scale,
-                           recon=recon)
+                           recon=recon, conform=args.conform, cap=not args.no_cap)
     print("[3/3] exporting...")
     export_dwelling(scene, name, args.viewer_dir)
     print("Open godot_viewer/ in Godot 4 and press F5 -- it loads the newest "
