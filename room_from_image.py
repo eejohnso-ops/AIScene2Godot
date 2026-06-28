@@ -559,6 +559,27 @@ def generate_herringbone(w_px: int, h_px: int,
 PPM = 128  # pixels per metre for generated textures
 
 
+def _project_uvs(verts: np.ndarray, fx: float, fy: float, cx: float, cy: float,
+                 W: int, H: int) -> np.ndarray:
+    """Per-vertex UVs that project camera-frame verts back into the source photo.
+
+    The room is reconstructed in the camera's own frame (camera at the origin
+    looking down +z, OpenCV axes), so the camera<->wall correspondence is just the
+    pinhole forward model: (u,v) = (fx*x/z + cx, fy*y/z + cy). Normalizing by the
+    image size gives a UV; verts the camera never saw project outside [0,1] and are
+    clamped (decal-style edge smear). UVs are invariant under the later scale/flip/
+    yaw/conform vertex transforms, so the photo stays mapped even when the wall is
+    stretched to a spec footprint -- real texture *and* clean tiling.
+    """
+    z = np.clip(verts[:, 2], 1e-3, None)
+    u = (fx * verts[:, 0] / z + cx) / W
+    v = (fy * verts[:, 1] / z + cy) / H
+    # glTF/Godot sample V from the opposite edge of how the procedural path is
+    # authored, so the projected photo comes out vertically flipped without this.
+    v = 1.0 - v
+    return np.clip(np.stack([u, v], axis=-1), 0.0, 1.0).astype(np.float32)
+
+
 def build_room_scene(
     planes: list[DetectedPlane],
     points: np.ndarray,
@@ -567,6 +588,7 @@ def build_room_scene(
     cam_intrinsics: tuple | None = None,
     subdivisions: int = 1,
     max_displacement: float = 0.15,
+    project_image: np.ndarray | None = None,
 ) -> "trimesh.Scene":
     """Build a room box with procedural textures and optional depth displacement.
 
@@ -574,6 +596,11 @@ def build_room_scene(
     depth_map + cam_intrinsics: when provided with subdivisions > 1, vertices are
         displaced toward their depth-map-implied positions for architectural relief.
     cam_intrinsics: (fx, fy, cx, cy) from depth_to_pointcloud.
+    project_image: the source RGB photo (HxWx3 uint8). When given with
+        cam_intrinsics, the three walls are textured by projecting the photo onto
+        them (raw projection) instead of a flat procedural tint. For clean walls
+        prefer `--sample-walls`, which sets a flat de-lit `surface_colors["wall"]`
+        and leaves engine lighting to the viewer; floor/ceiling stay procedural.
     """
     import trimesh
 
@@ -627,9 +654,21 @@ def build_room_scene(
         "wall_right": generate_wall_texture(int(D * PPM), int(H * PPM), wall_color),
     }
 
+    project = project_image is not None and cam_intrinsics is not None
+    photo = None
+    if project:
+        fx, fy, cx, cy = cam_intrinsics
+        H_px, W_px = project_image.shape[:2]
+        photo = Image.fromarray(project_image)
+        print(f"  projecting photo onto walls ({W_px}x{H_px} source)")
+
     scene = trimesh.Scene()
     for label, verts, faces, uvs in quads:
-        tex = textures.get(label)
+        if project and label.startswith("wall"):
+            uvs = _project_uvs(verts, fx, fy, cx, cy, W_px, H_px)
+            tex = photo
+        else:
+            tex = textures.get(label)
         visual = trimesh.visual.TextureVisuals(uv=uvs, image=tex)
         mesh = trimesh.Trimesh(vertices=verts, faces=faces,
                                visual=visual, process=False)
@@ -753,7 +792,9 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
                            max_displacement: float = 0.15,
                            min_plane_points: int = 5000,
                            ransac_threshold: float = 0.02,
-                           max_planes: int = 8):
+                           max_planes: int = 8,
+                           project_walls: bool = False,
+                           sample_walls: bool = False):
     """Run the full photo -> room-shell reconstruction and return a textured,
     depth-displaced trimesh.Scene in the **camera frame** (before scale/flip/
     placement). Stages mirror the CLI; callers apply scale+flip+placement.
@@ -779,11 +820,34 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
     print(f"    {len(planes)} planes: "
           + ", ".join(f"{p.label} ({len(p.inlier_indices)} pts)" for p in planes))
 
+    sampled_wall_color = None
+    if sample_walls:
+        # Sample a flat, consistent ALBEDO from genuine wall pixels only (no baked
+        # lighting -- the viewer's lights do the shading). The flat-wall mask drops
+        # furniture/hangings/shadow so the colour isn't skewed.
+        from wall_mask import flat_wall_masks, sample_wall_color
+        masks = flat_wall_masks(depth, planes, fx, fy, cx, cy,
+                                image_path=image, semantics=True)
+        sampled_wall_color = sample_wall_color(rgb, masks["flat"])
+        if sampled_wall_color is not None:
+            surface_colors = dict(surface_colors or {})
+            surface_colors["wall"] = {"color": list(sampled_wall_color)}  # sampled wins
+            print(f"    sampled flat-wall albedo RGB{sampled_wall_color} "
+                  f"from {100 * masks['flat'].mean():.1f}% flat-wall pixels")
+        else:
+            print("    too few flat-wall pixels to sample; keeping default colour")
+
     print("  [4/4] building textured, depth-displaced shell...")
-    return build_room_scene(planes, points, surface_colors=surface_colors,
-                            depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
-                            subdivisions=subdivisions,
-                            max_displacement=max_displacement)
+    scene = build_room_scene(planes, points, surface_colors=surface_colors,
+                             depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
+                             subdivisions=subdivisions,
+                             max_displacement=max_displacement,
+                             project_image=rgb if project_walls else None)
+    # Surface the sampled colour so a caller (build_dwelling) can match the doorway
+    # and cap walls it builds separately to the room's reconstructed walls.
+    if sampled_wall_color is not None:
+        scene.metadata["sampled_wall_color"] = list(sampled_wall_color)
+    return scene
 
 
 # ============================================================================
@@ -821,6 +885,14 @@ def main() -> None:
                     help="wall subdivision grid size for depth displacement (1=flat)")
     ap.add_argument("--max-displacement", type=float, default=0.15,
                     help="max depth displacement in metres (default 0.15)")
+    ap.add_argument("--project-walls", action="store_true",
+                    help="texture the walls by projecting the source photo onto "
+                         "them (real wall imagery) instead of a flat procedural "
+                         "tint; floor/ceiling stay procedural")
+    ap.add_argument("--sample-walls", action="store_true",
+                    help="tint the walls with the robust flat-wall colour sampled "
+                         "(via the depth+semantics flat-wall mask) from genuine "
+                         "wall pixels only -- no furniture/shadow/hanging bleed")
 
     args = ap.parse_args()
 
@@ -850,7 +922,8 @@ def main() -> None:
         surface_colors=surface_colors, subdivisions=args.subdivisions,
         max_displacement=args.max_displacement,
         min_plane_points=args.min_plane_points,
-        ransac_threshold=args.ransac_threshold, max_planes=args.max_planes)
+        ransac_threshold=args.ransac_threshold, max_planes=args.max_planes,
+        project_walls=args.project_walls, sample_walls=args.sample_walls)
     out = export_room(scene, args.name, args.scale, args.viewer_dir)
     print("Open the Godot project in godot_viewer/ and press F5 -- it loads "
           "all .glb files automatically.")
