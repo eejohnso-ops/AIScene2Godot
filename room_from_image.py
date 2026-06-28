@@ -820,6 +820,7 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
     print(f"    {len(planes)} planes: "
           + ", ".join(f"{p.label} ({len(p.inlier_indices)} pts)" for p in planes))
 
+    sampled_wall_color = None
     if sample_walls:
         # Sample a flat, consistent ALBEDO from genuine wall pixels only (no baked
         # lighting -- the viewer's lights do the shading). The flat-wall mask drops
@@ -827,21 +828,26 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
         from wall_mask import flat_wall_masks, sample_wall_color
         masks = flat_wall_masks(depth, planes, fx, fy, cx, cy,
                                 image_path=image, semantics=True)
-        color = sample_wall_color(rgb, masks["flat"])
-        if color is not None:
+        sampled_wall_color = sample_wall_color(rgb, masks["flat"])
+        if sampled_wall_color is not None:
             surface_colors = dict(surface_colors or {})
-            surface_colors["wall"] = {"color": list(color)}      # sampled wins
-            print(f"    sampled flat-wall albedo RGB{color} "
+            surface_colors["wall"] = {"color": list(sampled_wall_color)}  # sampled wins
+            print(f"    sampled flat-wall albedo RGB{sampled_wall_color} "
                   f"from {100 * masks['flat'].mean():.1f}% flat-wall pixels")
         else:
             print("    too few flat-wall pixels to sample; keeping default colour")
 
     print("  [4/4] building textured, depth-displaced shell...")
-    return build_room_scene(planes, points, surface_colors=surface_colors,
-                            depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
-                            subdivisions=subdivisions,
-                            max_displacement=max_displacement,
-                            project_image=rgb if project_walls else None)
+    scene = build_room_scene(planes, points, surface_colors=surface_colors,
+                             depth_map=depth, cam_intrinsics=(fx, fy, cx, cy),
+                             subdivisions=subdivisions,
+                             max_displacement=max_displacement,
+                             project_image=rgb if project_walls else None)
+    # Surface the sampled colour so a caller (build_dwelling) can match the doorway
+    # and cap walls it builds separately to the room's reconstructed walls.
+    if sampled_wall_color is not None:
+        scene.metadata["sampled_wall_color"] = list(sampled_wall_color)
+    return scene
 
 
 # ============================================================================

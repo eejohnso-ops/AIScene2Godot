@@ -401,6 +401,11 @@ def _reconstruct_room_meshes(room: dict, ceiling_h: float, scale: float,
         max_displacement=recon["max_displacement"],
         project_walls=recon.get("project_walls", False),
         sample_walls=recon.get("sample_walls", False))
+    # If --sample-walls sampled a wall colour, adopt it as the room's wall colour so
+    # the doorway/cap walls (built separately, below) match the reconstructed walls.
+    sampled = cam_scene.metadata.get("sampled_wall_color")
+    if sampled:
+        room.setdefault("colors", {})["wall"] = list(sampled)
     placement = Placement(
         pos=tuple(room["pos"]), yaw=float(room.get("yaw", 0)),
         target_height=ceiling_h,
