@@ -580,6 +580,25 @@ def _project_uvs(verts: np.ndarray, fx: float, fy: float, cx: float, cy: float,
     return np.clip(np.stack([u, v], axis=-1), 0.0, 1.0).astype(np.float32)
 
 
+def _project_uvs_view(verts: np.ndarray, K: np.ndarray, R: np.ndarray,
+                      t: np.ndarray, W: int, H: int) -> np.ndarray:
+    """Multi-view generalisation of `_project_uvs`: project WORLD-frame verts into
+    a specific camera given its (K, R, t) (extrinsic maps world -> camera, OpenCV
+    convention). Used by build_room_multiview.py to texture each wall from the
+    view that saw it best.
+
+    With R = I and t = 0 (the camera at the origin looking down +z) this reduces
+    exactly to `_project_uvs(verts, K[0,0], K[1,1], K[0,2], K[1,2], W, H)`, so the
+    single-view path is the identity-pose special case.
+    """
+    cam = verts @ R.T + t                      # world -> camera frame
+    z = np.clip(cam[:, 2], 1e-3, None)
+    u = (K[0, 0] * cam[:, 0] / z + K[0, 2]) / W
+    v = (K[1, 1] * cam[:, 1] / z + K[1, 2]) / H
+    v = 1.0 - v
+    return np.clip(np.stack([u, v], axis=-1), 0.0, 1.0).astype(np.float32)
+
+
 def build_room_scene(
     planes: list[DetectedPlane],
     points: np.ndarray,
@@ -794,13 +813,21 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
                            ransac_threshold: float = 0.02,
                            max_planes: int = 8,
                            project_walls: bool = False,
-                           sample_walls: bool = False):
+                           sample_walls: bool = False,
+                           return_extras: bool = False):
     """Run the full photo -> room-shell reconstruction and return a textured,
     depth-displaced trimesh.Scene in the **camera frame** (before scale/flip/
     placement). Stages mirror the CLI; callers apply scale+flip+placement.
 
     Used both by this script's CLI (single room) and by build_dwelling.py, which
     drops the result into a floor-plan slot via `place_room()`.
+
+    The camera intrinsics (fx, fy, cx, cy) and hfov are attached to
+    `scene.metadata` (small, JSON-safe -- survive GLB export). When
+    `return_extras=True`, returns `(scene, extras)` where `extras` carries the
+    heavy arrays the multi-view path needs (depth map, point cloud + colours, the
+    detected planes, source rgb); these are NOT put on `scene.metadata` because
+    trimesh serialises that into the GLB and numpy arrays would break export.
     """
     print("  [1/4] estimating depth...")
     depth, rgb = estimate_depth(image, checkpoint)
@@ -847,6 +874,20 @@ def reconstruct_room_scene(image: str, checkpoint: str, *,
     # and cap walls it builds separately to the room's reconstructed walls.
     if sampled_wall_color is not None:
         scene.metadata["sampled_wall_color"] = list(sampled_wall_color)
+    # Surface the (small, JSON-safe) camera model so downstream consumers -- e.g.
+    # multi-view fusion / wall reprojection -- don't have to re-guess intrinsics.
+    scene.metadata["cam_intrinsics"] = [float(fx), float(fy), float(cx), float(cy)]
+    scene.metadata["hfov"] = float(hfov)
+    if return_extras:
+        extras = {
+            "depth": depth,
+            "rgb": rgb,
+            "points": points,
+            "colors": colors,
+            "intrinsics": (fx, fy, cx, cy),
+            "planes": planes,
+        }
+        return scene, extras
     return scene
 
 
