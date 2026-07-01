@@ -1,0 +1,188 @@
+{
+ "1": {
+  "class_type": "WanVideoBlockSwap",
+  "inputs": {
+   "blocks_to_swap": 36,
+   "offload_img_emb": false,
+   "offload_txt_emb": false,
+   "use_non_blocking": true,
+   "vace_blocks_to_swap": 0,
+   "prefetch_blocks": 0,
+   "block_swap_debug": false
+  }
+ },
+ "2": {
+  "class_type": "WanVideoModelLoader",
+  "inputs": {
+   "model": "Wan\\wan2.1_fun_camera_v1.1_14B_bf16.safetensors",
+   "base_precision": "bf16",
+   "quantization": "disabled",
+   "load_device": "offload_device",
+   "attention_mode": "sdpa",
+   "block_swap_args": [
+    "1",
+    0
+   ]
+  }
+ },
+ "3": {
+  "class_type": "LoadWanVideoT5TextEncoder",
+  "inputs": {
+   "model_name": "umt5-xxl-enc-bf16.safetensors",
+   "precision": "bf16",
+   "load_device": "offload_device",
+   "quantization": "disabled"
+  }
+ },
+ "4": {
+  "class_type": "WanVideoTextEncode",
+  "inputs": {
+   "positive_prompt": "interior of a living room, sofa, coffee table, wooden bookshelves, patterned rug, tall windows, framed pictures on the walls, smooth orbiting camera, photorealistic, consistent room geometry, high detail",
+   "negative_prompt": "distorted geometry, warping, duplicated room, flicker, blurry, lowres, text, watermark, people",
+   "t5": [
+    "3",
+    0
+   ],
+   "force_offload": true,
+   "device": "gpu"
+  }
+ },
+ "5": {
+  "class_type": "WanVideoVAELoader",
+  "inputs": {
+   "model_name": "Wan\\Wan2_1_VAE_bf16.safetensors",
+   "precision": "bf16"
+  }
+ },
+ "6": {
+  "class_type": "LoadImage",
+  "inputs": {
+   "image": "wb_room_source.png"
+  }
+ },
+ "7": {
+  "class_type": "ImageResizeKJv2",
+  "inputs": {
+   "image": [
+    "6",
+    0
+   ],
+   "width": 832,
+   "height": 576,
+   "upscale_method": "lanczos",
+   "keep_proportion": "crop",
+   "pad_color": "0, 0, 0",
+   "crop_position": "center",
+   "divisible_by": 16,
+   "device": "cpu"
+  }
+ },
+ "8": {
+  "class_type": "ADE_CameraPoseCombo",
+  "inputs": {
+   "motion_type1": "Pan Right",
+   "motion_type2": "Tilt Left",
+   "motion_type3": "Static",
+   "motion_type4": "Static",
+   "motion_type5": "Static",
+   "motion_type6": "Static",
+   "speed": 0.2,
+   "frame_length": 81
+  }
+ },
+ "9": {
+  "class_type": "WanVideoFunCameraEmbeds",
+  "inputs": {
+   "poses": [
+    "8",
+    0
+   ],
+   "width": 832,
+   "height": 576,
+   "strength": 1.0,
+   "start_percent": 0.0,
+   "end_percent": 1.0
+  }
+ },
+ "10": {
+  "class_type": "WanVideoImageToVideoEncode",
+  "inputs": {
+   "width": 832,
+   "height": 576,
+   "num_frames": 81,
+   "noise_aug_strength": 0.03,
+   "start_latent_strength": 1.0,
+   "end_latent_strength": 1.0,
+   "force_offload": true,
+   "vae": [
+    "5",
+    0
+   ],
+   "start_image": [
+    "7",
+    0
+   ],
+   "control_embeds": [
+    "9",
+    0
+   ],
+   "fun_or_fl2v_model": true,
+   "tiled_vae": false
+  }
+ },
+ "11": {
+  "class_type": "WanVideoSampler",
+  "inputs": {
+   "model": [
+    "2",
+    0
+   ],
+   "image_embeds": [
+    "10",
+    0
+   ],
+   "text_embeds": [
+    "4",
+    0
+   ],
+   "steps": 30,
+   "cfg": 6.0,
+   "shift": 5.0,
+   "seed": 42,
+   "force_offload": true,
+   "scheduler": "unipc",
+   "riflex_freq_index": 0,
+   "denoise_strength": 1.0,
+   "rope_function": "comfy"
+  }
+ },
+ "12": {
+  "class_type": "WanVideoDecode",
+  "inputs": {
+   "vae": [
+    "5",
+    0
+   ],
+   "samples": [
+    "11",
+    0
+   ],
+   "enable_vae_tiling": true,
+   "tile_x": 272,
+   "tile_y": 272,
+   "tile_stride_x": 144,
+   "tile_stride_y": 128,
+   "normalization": "default"
+  }
+ },
+ "13": {
+  "class_type": "SaveImage",
+  "inputs": {
+   "images": [
+    "12",
+    0
+   ],
+   "filename_prefix": "wb_room_orbit2"
+  }
+ }
+}
