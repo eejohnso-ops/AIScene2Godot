@@ -156,6 +156,12 @@ boundary is the most useful thing it can offer:
   with tears (per-face cubemap depth) or a sphere (native-360 depth). One
   viewpoint never contains the occluded geometry, so depth estimation can only
   ever recover a shell. [Full writeup + evidence.](docs/panorama-experiments.md)
+- ❌ **Multi-view from a single photo** (`mv_register.py`, `novel_views*.py`,
+  `wall_complete*.py`, `build_room_multiview.py`): reprojected novel views carry
+  no real baseline (VGGT collapses them), and even camera-video generation
+  (which *does* invent coherent new views — that half works) couldn't be
+  projected onto the room box without visible skew. Parked; the tools remain
+  valid for *real* multi-photo input. [Full writeup.](docs/multiview-experiments.md)
 
 The takeaway: **object generators give you props; they don't give you rooms.** A
 full game scene is "generated objects + a shell you build or generate separately."
